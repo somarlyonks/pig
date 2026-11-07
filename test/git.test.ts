@@ -1,13 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
 	assertSafeGitRef,
 	branchSlug,
+	commitAll,
 	listChangedPaths,
 	resetLocalGitConfig,
+	revertWorkflowChanges,
 	runGit,
 	sanitizeCommitMessage,
 	withGitAskpass,
@@ -63,6 +72,59 @@ test("creates and removes a short-lived askpass script", async () => {
 	});
 	assert.match(result, /PIG_GIT_TOKEN/);
 	assert.equal(existsSync(scriptPath), false);
+});
+
+test("reverts and removes workflow file changes", async () => {
+	const directory = temporaryDirectory();
+	try {
+		await runGit(["init", "-q"], { cwd: directory });
+		await runGit(["config", "user.email", "test@example.com"], { cwd: directory });
+		await runGit(["config", "user.name", "Test"], { cwd: directory });
+		mkdirSync(join(directory, ".github", "workflows"), { recursive: true });
+		writeFileSync(join(directory, ".github", "workflows", "ci.yml"), "name: CI\n");
+		writeFileSync(join(directory, "app.txt"), "app\n");
+		await runGit(["add", "-A"], { cwd: directory });
+		await runGit(["commit", "-q", "-m", "initial"], { cwd: directory });
+
+		writeFileSync(join(directory, ".github", "workflows", "ci.yml"), "name: Hacked\n");
+		writeFileSync(join(directory, ".github", "workflows", "new.yml"), "name: New\n");
+		writeFileSync(join(directory, "app.txt"), "changed\n");
+
+		const changed = await listChangedPaths(directory);
+		const guard = await revertWorkflowChanges(directory, changed);
+		assert.deepEqual(guard.reverted.sort(), [
+			".github/workflows/ci.yml",
+			".github/workflows/new.yml",
+		]);
+		assert.equal(readFileSync(join(directory, ".github", "workflows", "ci.yml"), "utf8"), "name: CI\n");
+		assert.equal(existsSync(join(directory, ".github", "workflows", "new.yml")), false);
+		assert.deepEqual(await listChangedPaths(directory), ["app.txt"]);
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test("commits all changes and returns null for an empty tree", async () => {
+	const directory = temporaryDirectory();
+	try {
+		await runGit(["init", "-q"], { cwd: directory });
+		assert.equal(
+			await commitAll({ cwd: directory, message: "nothing", name: "PiG", email: "pig@example.com" }),
+			null,
+		);
+		writeFileSync(join(directory, "file.txt"), "content\n");
+		const sha = await commitAll({
+			cwd: directory,
+			message: "feat: add file",
+			name: "PiG",
+			email: "pig@example.com",
+		});
+		assert.match(sha ?? "", /^[0-9a-f]{40}$/);
+		const log = await runGit(["log", "-1", "--format=%s%n%an"], { cwd: directory });
+		assert.equal(log.stdout.trim(), "feat: add file\nPiG");
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
 });
 
 test("rejects unsafe references and normalizes helpers", () => {
