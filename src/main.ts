@@ -26,7 +26,7 @@ async function main(): Promise<void> {
 	const version = readVersion();
 
 	const store = new JobStore(config.databasePath);
-	const clients = createGitHubClients(config);
+	const clients = createGitHubClients(config, logger);
 	const configLoader = new RepoConfigLoader(30, logger);
 	const agentRunner: AgentRunner = (options) => runPiAgent(config.piBin, options);
 	const worker = new JobWorker({

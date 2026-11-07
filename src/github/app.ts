@@ -1,19 +1,35 @@
 import { Octokit } from "@octokit/rest";
 import { createAppAuth } from "@octokit/auth-app";
 import type { AppConfig } from "../config.ts";
+import type { Logger } from "../logger.ts";
 
 export interface GitHubClients {
 	app: Octokit;
 	installation(installationId: number): Octokit;
 }
 
-export function createGitHubClients(config: Pick<AppConfig, "appId" | "privateKey">): GitHubClients {
+function octokitLogger(logger: Logger | undefined) {
+	if (!logger) return undefined;
+	return {
+		debug: (message: string) => logger.debug(message),
+		info: (message: string) => logger.debug(message),
+		warn: (message: string) => logger.debug(message),
+		error: (message: string) => logger.warn(message),
+	};
+}
+
+export function createGitHubClients(
+	config: Pick<AppConfig, "appId" | "privateKey">,
+	logger?: Logger,
+): GitHubClients {
+	const log = octokitLogger(logger);
 	const app = new Octokit({
 		authStrategy: createAppAuth,
 		auth: {
 			appId: config.appId,
 			privateKey: config.privateKey,
 		},
+		...(log ? { log } : {}),
 	});
 
 	const installationCache = new Map<number, Octokit>();
@@ -32,6 +48,7 @@ export function createGitHubClients(config: Pick<AppConfig, "appId" | "privateKe
 					privateKey: config.privateKey,
 					installationId,
 				},
+				...(log ? { log } : {}),
 			});
 			installationCache.set(installationId, octokit);
 			return octokit;
