@@ -3,7 +3,7 @@ FROM node:24-bookworm-slim AS build
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 
 COPY tsconfig.json tsconfig.check.json ./
 COPY src ./src
@@ -15,14 +15,12 @@ FROM node:24-bookworm-slim
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends git ca-certificates \
 	&& rm -rf /var/lib/apt/lists/*
-RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.5.0
 
 WORKDIR /app
 ENV NODE_ENV=production
 ENV HOME=/home/node
 ENV PIG_DATABASE_PATH=/data/pig.sqlite
 ENV PIG_WORKSPACE_ROOT=/data/workspaces
-ENV PIG_PI_BIN=pi
 
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist

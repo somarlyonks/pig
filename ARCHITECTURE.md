@@ -1,18 +1,18 @@
 # PiG — Architecture and Product Specification
 
-PiG (Pi-durable In GitHub) is a GitHub App that runs durable AI coding jobs with [Pi](https://pi.dev). GitHub is the entire user interface: install the app, mention it in a comment, and it opens pull requests, reviews code, or releases a version.
+PiG (Pi-durable In GitHub) is a GitHub App that runs durable AI coding jobs with [Pi](https://pi.dev). It is built on [`@earendil-works/pi-durable`](https://github.com/earendil-works/pi/tree/main/packages/durable): every job, agent conversation, model turn, tool call, and app checkpoint is committed to storage before it is shown or acted on. GitHub is the entire user interface: install the app, mention it in a comment, and it opens pull requests, reviews code, or releases a version.
 
 This document specifies observable behavior. Implementation choices live in the code; product rules that must not drift live here.
 
 ## 1. Actors and trust boundaries
 
-- **Installer / operator** owns the GitHub App, server, model credentials, and database. They install PiG on selected repositories.
+- **Installer / operator** owns the GitHub App, server, model credentials, and durable database. They install PiG on selected repositories.
 - **Repository writers** (`admin`, `maintain`, `write`, or `push` permission) may use PiG in that repository. A repository may also allow extra GitHub logins through `.pig.yml`.
 - **Repository readers and strangers** cannot start jobs. PiG verifies permission server-side before running anything, even when the comment came from a seemingly trusted association.
 - **GitHub** is the source of truth for repository content, pull requests, reviews, tags, and releases.
-- **Pi** is the reasoning engine. It runs isolated per job with a tool allowlist; it never receives the GitHub App private key or installation token.
+- **Pi** is the reasoning engine. It runs as durable conversations inside the PiG process. Agent tools are selected per job and receive a restricted environment and filesystem view appropriate to their kind.
 
-A public repository with the app installed may receive mention comments from anyone. Such jobs are queued, authorized, denied, and answered cheaply. They never reach the agent.
+A public repository with the app installed may receive mention comments from anyone. Such comments become durable admission records and tasks, are authorized, denied, and answered cheaply, and never reach an agent conversation unless the author has write access (or is explicitly allowed by `.pig.yml`).
 
 ## 2. Invocation surface
 
@@ -25,7 +25,7 @@ Users interact by commenting on an issue or pull request:
 | `@pig review [focus]` | Review the current pull request, optionally focusing on a topic |
 | `@pig release [auto\|major\|minor\|patch\|<version>]` | Tag the default branch and publish a GitHub Release |
 | `@pig status` | Show recent durable jobs for the repository |
-| `@pig cancel` | Cancel queued jobs and stop the running job |
+| `@pig cancel` | Cancel queued/waiting/sleeping jobs and stop the running job |
 | `@pig help` | Show usage |
 
 `/pig` is accepted as an alias for `@pig`. Commands are case-insensitive. A bare `@pig` shows help. Review and release flags: `--draft`, `--prerelease`.
@@ -35,49 +35,69 @@ Automatic behavior:
 - **Automatic review** is queued when a pull request is `opened`, `reopened`, `synchronize`d, or marked `ready_for_review`.
 - Draft pull requests are skipped when `review.skip_drafts` is true.
 - Pull requests authored by PiG itself are never auto-reviewed, preventing feedback loops.
-- A review event is deduplicated by repository, pull request number, and head SHA.
+- A review event is deduplicated by repository, pull request number, and head SHA. `ready_for_review` has its own key so a draft PR can still be reviewed when it becomes ready at the same SHA.
 - A stale automatic review (head SHA changed before it ran) is skipped because a newer event supersedes it.
 
 PiG never edits a pull request body to add reviews, and never approves by default.
 
 ## 3. Durable job contract
 
-Every command becomes a durable job before GitHub receives an acknowledgement. Jobs survive process restart, deployment, and worker crashes.
+PiG uses one `pi-durable` Harness over one SQLite storage. One process owns that storage at a time; `pi-durable` has no cross-process locking. The Harness is resumed on startup, which recovers tasks that were cut off by a crash, shutdown, or host failure.
 
-### States
+### Admission
 
-`queued → running → succeeded | failed | cancelled`
+Every webhook is verified from its raw body with `X-Hub-Signature-256`, parsed, and then admitted in one durable commit before GitHub receives its acknowledgement:
 
-- A worker claims a job with a time-bounded lease and extends the lease while it works.
-- Expired leases are recovered: jobs are requeued until their attempt limit is exhausted, then failed.
-- A graceful shutdown aborts active work and requeues it without consuming an attempt.
-- Retries use exponential backoff. Agent timeouts are not retried; temporary infrastructure and model failures are retried once by default.
-- Jobs may carry an `attempts/max_attempts` budget. Control jobs do not retry.
+- A **delivery record** keyed by the GitHub delivery ID makes replays duplicates.
+- A **command record** keyed by the stable command key makes repeated commands idempotent. A duplicate command reuses the original job task.
+- A **repository record** tracks the tail of the per-repository job chain.
+- A **job task** and its **job document** are created atomically with those records.
+
+Ignored events (no mention, bot author, unsupported action) also record their delivery so a replay is a duplicate and no work is repeated.
+
+### Task, conversation, and state
+
+- Each command is a durable `pig.job` task with an input, phase checkpoint, attempt budget, and terminal outcome.
+- A work or review job creates one **agent conversation per attempt**, owned by the job task. The conversation stores its model, thinking level, working directory, tool selection, instructions, transcript, and live task state.
+- One **job document** per task stores status, the handler checkpoint, progress-comment ID, agent conversation ID, attempt number, summary, error, and a bounded event log. It survives the task's terminal state.
+- Task-scoped documents are not used for job history because `pi-durable` retires them when the task ends.
 
 ### Ordering and concurrency
 
-- At most one agent job per repository runs at a time. This prevents conflicting branch pushes and release races.
-- Different repositories may run concurrently, bounded by the operator's concurrency setting.
-- Control jobs (`status`, `help`, `cancel`) bypass the repository lock so cancellation remains responsive. They still require authorization.
+- Agent jobs for one repository run in admission order. Each new job task waits on the previous agent job task for that repository before doing work. A terminal, failed, or cancelled predecessor does not block the successor.
+- Control jobs (`status`, `help`, `cancel`) bypass the repository chain so cancellation and inspection remain responsive. They still require authorization.
+- Different repositories may run concurrently. There is no global concurrency cap in v1; the operator limits concurrency by limiting repositories and host resources.
 
-### Exactly-once intent
+### Retries and recovery
 
-- GitHub webhook deliveries are recorded and ignored on replay.
-- Commands are idempotent per comment/event, so a redelivery cannot start the same work twice.
-- Automatic reviews are idempotent per head SHA.
-- Jobs persist checkpoints for irreversible steps:
-  - A PR update records the pushed commit before PR bookkeeping.
-  - A review records the posted review URL so a retry knows the side effect is complete.
-  - A release records the planned tag, target commit, version, notes, and draft/prerelease flags before creating external state.
-- On retry, PiG resumes from the checkpoint instead of rebuilding or duplicating work.
-- Narrow crash windows after an external side effect but before its checkpoint may still produce a duplicate attempt; handlers re-check GitHub state (existing tags/releases, existing PRs) before repeating effects.
+- A retryable failure ends the job phase `sleeping` with exponential backoff (15s, 30s, 60s, capped at 120s) and an incremented attempt. The task resumes at its checkpoint.
+- Permanent failures and exhausted attempts end the task with a failed outcome and a visible error.
+- A crash or process shutdown leaves the task and its conversation durable. Reopening the storage resumes the task and the agent run. Completed tool calls and turns are not repeated; an in-flight model request is treated as a failed attempt under Pi's retry policy.
+- `pi-durable`'s restart limit bounds crash loops. A task that keeps cutting off its process ends instead of running forever.
+- A workspace is reused within one attempt so a resumed conversation finds its files. A new attempt gets a fresh checkout.
+
+### Cancellation
+
+- `@pig cancel` aborts live job tasks for the repository except the cancel command itself. A job that is pending, running, waiting, or sleeping is abort-marked.
+- Aborting a job cascades to its owned agent conversation, then runs the job's abort handler in a fresh invocation. The handler posts a cancellation comment and commits an aborted outcome.
+- A cancelled job's successor in the repository chain proceeds.
+
+### Checkpoints
+
+Handlers persist checkpoints for irreversible steps:
+
+- A work PR update records the pushed commit before PR bookkeeping.
+- A review records the posted review URL after the review succeeds, and also detects a review already posted by PiG for the same head commit before posting again.
+- A release records the planned tag, target commit, version, notes, and draft/prerelease flags before creating external state.
+
+Retries resume from the checkpoint rather than rebuilding completed work.
 
 ### Progress reporting
 
-- Work, manual review, and release jobs post one progress comment, then edit it instead of adding comments.
+- Work, manual review, release, and control jobs post one progress comment, then edit it instead of adding comments.
 - Automatic reviews are silent until the review is posted.
 - Failures update the progress comment with the actionable error; automatic reviews fail silently to avoid noise on every push.
-- Full job history and event logs are available to the operator over an authenticated admin endpoint.
+- Job status, request, events, and progress-comment ID are available to the operator over an authenticated admin endpoint.
 
 ## 4. Work requests
 
@@ -85,7 +105,7 @@ A work request targets an issue or a pull request.
 
 **On an issue**:
 
-- PiG clones the default branch, creates a branch under the configured prefix, runs the agent, commits, pushes, and opens a pull request.
+- PiG checks out the default branch into an attempt-specific workspace, creates a branch under the configured prefix, runs the agent, commits, pushes, and opens a pull request.
 - The branch name is deterministic for the job, so retries update the same branch with a force push.
 - The PR body closes the issue (unless the agent already wrote a closing reference) and credits the requester.
 - If the agent changes nothing, no branch or PR is created and the progress comment says so.
@@ -101,7 +121,7 @@ A work request targets an issue or a pull request.
 
 **Agent constraints**:
 
-- The agent works in a throwaway checkout. It must not commit, push, create pull requests, touch `.git/`, or use `.pig/` except for its result file.
+- The agent works in a throwaway checkout. It must not commit, amend, rebase, push, create pull requests, touch `.git/`, or use `.pig/` except for its result file.
 - PiG, not the agent, commits and pushes.
 - Workflow file changes (`.github/workflows/**`) are reverted before commit unless `work.allow_workflow_changes` is true and the GitHub App has the Workflows permission. The PR body/comment records any reverted files.
 - The PR title/body and commit message come from the agent's structured result when available; PiG falls back to the issue title and final agent message.
@@ -109,8 +129,8 @@ A work request targets an issue or a pull request.
 
 ## 5. Reviews
 
-- The pull request head is checked out read-only. The agent has read, search, list, and write tools; write exists only for the result file. It has no shell.
-- PiG supplies the unified diff, PR metadata, changed-file stats, and an optional inline-comment focus. The agent can inspect surrounding code.
+- The pull request head is checked out read-only. The review agent can read files and write only `.pig/review.json`; it has no shell.
+- PiG supplies the unified diff, PR metadata, changed-file stats, and an optional inline-comment focus. The agent can inspect surrounding code by reading files.
 - Findings are structured, with file path, line, side (`RIGHT` for new lines, `LEFT` for removed lines), severity (`blocker`, `issue`, `nit`), and Markdown body.
 - Only findings that map to a real line in the diff are posted inline. Others are listed in the review body with a reason.
 - Duplicate findings are removed. Inline findings are capped by `review.max_findings`.
@@ -123,7 +143,7 @@ A work request targets an issue or a pull request.
 - A release targets the repository's default branch.
 - Only semantic versions under `release.tag_prefix` are considered. Comparison follows semver, including prerelease ordering.
 - Version selection:
-  - `auto`: infer from merged PRs since the last tag using labels and conventional-commit titles (`10` → major, `feat` → minor, otherwise patch). First release is `0.1.0`, or `1.0.0` if breaking.
+  - `auto`: infer from merged PRs since the last tag using labels and conventional-commit titles (`!`/breaking labels → major, `feat`/feature labels → minor, otherwise patch). First release is `0.1.0`, or `1.0.0` if breaking.
   - `major` / `minor` / `patch`: bump the latest release version.
   - Exact version: used as-is; versions below the latest are rejected.
 - Merged pull requests are collected from GitHub, excluding PRs labeled `skip-changelog`, `no-changelog`, or `release-skip`, internal `chore(release)` PRs, and PRs merged into other branches.
@@ -144,9 +164,9 @@ A work request targets an issue or a pull request.
 version: 1
 
 agent:
-  model: sonnet:high        # optional; overrides PIG_MODEL
-  thinking: high            # optional; overrides PIG_THINKING
-  timeout_minutes: 30       # capped by the operator's PIG_JOB_TIMEOUT_MINUTES
+  model: anthropic/claude-sonnet-4-5  # optional; overrides PIG_MODEL
+  thinking: high                      # optional; overrides PIG_THINKING
+  timeout_minutes: 30                 # capped by the operator's PIG_JOB_TIMEOUT_MINUTES
 
 review:
   auto: true
@@ -174,18 +194,20 @@ Configuration is trusted only from the default branch. A PR cannot change PiG's 
 - Webhooks require a valid `X-Hub-Signature-256` HMAC. Unsigned or stale deliveries are rejected before parsing.
 - Authorization happens server-side per job. `.pig.yml` may grant named users, but only writers can change that file on the default branch.
 - PiG never pushes to the default branch and never force-pushes an existing pull request branch. It force-pushes only its own deterministic `pig/*` branch for issue work.
-- Host Git operations use a short-lived askpass file created around the operation and removed afterwards. The installation token is not passed to the agent environment.
-- The host rewrites the local Git config after the agent finishes, disables hooks and credential helpers, and pushes to an explicit repository URL to prevent agent-controlled remote redirection.
-- Git subprocesses receive a minimal environment; the App private key, webhook secret, and admin token are never exposed to them.
-- The agent receives only model-provider environment variables. Work agents have shell and network access by design. Operators must run PiG in a container or dedicated host and must treat repository content as untrusted.
-- The agent's process group is killed when Pi exits, including any lingering background children from shell commands.
+- Host Git operations use a short-lived askpass file created around the operation and removed afterwards. Hooks and credential helpers are disabled; the local Git config is reset after agent work; pushes use an explicit repository URL.
+- Agent shell commands receive a minimal environment: system basics, `CI`, and Git no-prompt guards. `PIG_*`, `GITHUB_*`, `GH_*`, model provider keys, and unrelated host secrets are not inherited.
+- Review agents have no shell and may write only `.pig/review.json`.
+- The in-process agent can still read files the PiG process can read. Run PiG in a container or dedicated host, as a non-root user, with only the data volume mounted.
+- The agent's process group is cleaned up when a bash tool call exits.
 
 ## 9. Limits and non-goals (v1)
 
 - Single GitHub host (github.com); GitHub Enterprise Server is not configured.
-- SQLite persistence, single host strongly recommended for the workspace volume. Multiple workers on one host are supported through leases.
-- No web dashboard. GitHub comments, reviews, releases, and the status command are the user interface.
+- One process owns one `pi-durable` SQLite storage. There is no cross-process locking or horizontal scaling. High availability comes from restart and durable resume, not from replicas.
+- The app depends on an **experimental** `pi-durable` API. Upgrades may require data migrations; PiG pins an exact version.
+- No web dashboard. GitHub comments, reviews, releases, the status command, and the admin endpoint are the interface.
 - No package publishing, deployment automation, merge queues, or issue triage.
-- No continuation of the same Pi conversation across separate commands. Every job starts a fresh ephemeral session.
+- No continuation of the same Pi conversation across separate commands. Every job attempt starts a fresh conversation, while a crash within an attempt resumes it.
 - Automatic review is one pass; PiG does not re-review its own fixes explicitly.
 - Repository configuration cannot install extensions or arbitrary commands for the agent.
+- Durable delivery and command records grow with webhook history; v1 does not prune them.

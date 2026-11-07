@@ -1,23 +1,17 @@
 import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AppConfig } from "./config.ts";
-import type { JobStore } from "./jobs/store.ts";
+import type { PigApp } from "./durable/app.ts";
 import type { Logger } from "./logger.ts";
-import type { WebhookResult } from "./webhooks/handler.ts";
 import { verifyWebhookSignature } from "./webhooks/verify.ts";
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
 
 export interface HttpServerOptions {
 	config: AppConfig;
-	store: JobStore;
 	logger: Logger;
 	version: string;
-	handleWebhook: (input: {
-		event: string;
-		deliveryId: string;
-		payload: unknown;
-	}) => WebhookResult;
+	app: PigApp;
 }
 
 export interface RunningServer {
@@ -69,36 +63,6 @@ function isAdmin(request: IncomingMessage, token: string | undefined): boolean {
 	return tokenEquals(authorization.slice("Bearer ".length).trim(), token);
 }
 
-function adminJobsUrl(request: IncomingMessage, store: JobStore): { status: number; body: unknown } | null {
-	const url = new URL(request.url ?? "/", "http://localhost");
-	if (url.pathname !== "/api/jobs" && !url.pathname.startsWith("/api/jobs/")) {
-		return null;
-	}
-	const repo = url.searchParams.get("repo");
-	if (url.pathname === "/api/jobs") {
-		if (!repo) {
-			return { status: 400, body: { error: "repo query parameter is required" } };
-		}
-		const rawLimit = Number(url.searchParams.get("limit") ?? 20);
-		const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 100) : 20;
-		const jobs = store.getJobsForRepo(repo, limit);
-		return { status: 200, body: { jobs } };
-	}
-
-	const jobId = url.pathname.slice("/api/jobs/".length);
-	const job = store.getJob(jobId);
-	if (!job) {
-		return { status: 404, body: { error: "job not found" } };
-	}
-	return {
-		status: 200,
-		body: {
-			job,
-			events: store.getEvents(jobId),
-		},
-	};
-}
-
 export function startHttpServer(options: HttpServerOptions): Promise<RunningServer> {
 	const startedAt = Date.now();
 	const logger = options.logger;
@@ -128,9 +92,11 @@ export function startHttpServer(options: HttpServerOptions): Promise<RunningServ
 		const url = new URL(request.url ?? "/", "http://localhost");
 
 		if (request.method === "GET" && url.pathname === "/healthz") {
+			const activeJobs = await options.app.activeJobs();
 			sendJson(response, 200, {
 				ok: true,
 				uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
+				activeJobs,
 			});
 			return;
 		}
@@ -144,17 +110,33 @@ export function startHttpServer(options: HttpServerOptions): Promise<RunningServ
 			return;
 		}
 
-		if (request.method === "GET" && (url.pathname === "/api/jobs" || url.pathname.startsWith("/api/jobs/"))) {
+		if (
+			request.method === "GET" &&
+			(url.pathname === "/api/jobs" || url.pathname.startsWith("/api/jobs/"))
+		) {
 			if (!isAdmin(request, options.config.adminToken)) {
 				sendJson(response, options.config.adminToken ? 401 : 404, { error: "not found" });
 				return;
 			}
-			const result = adminJobsUrl(request, options.store);
-			if (!result) {
-				sendJson(response, 404, { error: "not found" });
+			if (url.pathname === "/api/jobs") {
+				const repo = url.searchParams.get("repo");
+				if (!repo) {
+					sendJson(response, 400, { error: "repo query parameter is required" });
+					return;
+				}
+				const rawLimit = Number(url.searchParams.get("limit") ?? 20);
+				const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 100) : 20;
+				const jobs = await options.app.listJobs(repo, limit);
+				sendJson(response, 200, { jobs });
 				return;
 			}
-			sendJson(response, result.status, result.body);
+			const jobId = url.pathname.slice("/api/jobs/".length);
+			const detail = await options.app.getJob(jobId);
+			if (!detail) {
+				sendJson(response, 404, { error: "job not found" });
+				return;
+			}
+			sendJson(response, 200, detail);
 			return;
 		}
 
@@ -189,7 +171,7 @@ export function startHttpServer(options: HttpServerOptions): Promise<RunningServ
 				sendJson(response, 400, { error: "invalid JSON payload" });
 				return;
 			}
-			const result = options.handleWebhook({ event, deliveryId, payload });
+			const result = await options.app.admit({ event, deliveryId, payload });
 			sendJson(response, result.status, result.body);
 			return;
 		}

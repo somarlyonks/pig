@@ -1,36 +1,30 @@
 # PiG
 
-**Pi-durable In GitHub.** A durable GitHub App that makes pull requests, reviews code, and manages releases with [Pi](https://pi.dev).
+**Pi-durable In GitHub.** A durable GitHub App that makes pull requests, reviews code, and manages releases with [Pi](https://pi.dev), built on [`@earendil-works/pi-durable`](https://github.com/earendil-works/pi/tree/main/packages/durable).
 
-Comment `@pig` on an issue or pull request. PiG queues a durable job, runs Pi in a throwaway checkout, and reports back on GitHub:
+Comment `@pig` on an issue or pull request. PiG admits a durable task, runs a durable Pi conversation in a throwaway checkout, and reports back on GitHub:
 
 - **Work** — implement an issue and open a PR, or push a fix to the current PR branch.
 - **Review** — post a structured review with inline findings on the changed lines.
 - **Release** — infer or choose a version, tag the default branch, and publish grouped release notes.
 - **Status / Cancel** — inspect or stop the repository's jobs.
 
-Every job survives restarts, webhook redeliveries, and retried attempts. See [ARCHITECTURE.md](ARCHITECTURE.md) for the product contract and safety rules.
+Jobs, conversations, tool calls, checkpoints, and admission records live in `pi-durable` storage. If the process stops mid-run, reopening the same SQLite file resumes the workflow and the agent run from its last durable checkpoint. See [ARCHITECTURE.md](ARCHITECTURE.md) for the product contract.
+
+> `@earendil-works/pi-durable` is experimental and its API changes between releases. PiG pins `1.5.0`; treat upgrades as migrations.
 
 ## Requirements
 
-- Node.js 24+ (uses built-in `node:sqlite` and TypeScript type stripping)
+- Node.js 24+ (the app and `pi-durable` both require a modern Node)
 - Git
 - A GitHub App with a private key and webhook secret
-- Pi installed and authenticated with a model provider
+- Credentials for a model provider that Pi's `pi-ai` supports
 
-```bash
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-pi --version
-pi            # then run /login
-```
-
-Alternatively set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or another provider variable in `.env`.
+The app embeds `pi-durable` and `pi-ai`; it does **not** run the `pi` CLI and does **not** use the CLI's `/login` session state. Configure model credentials with provider environment variables.
 
 ## Create the GitHub App
 
 GitHub → Settings → Developer settings → GitHub Apps → **New GitHub App**.
-
-Use these settings:
 
 | Setting | Value |
 | --- | --- |
@@ -85,17 +79,20 @@ Common:
 | --- | --- | --- |
 | `PIG_APP_SLUG` | `pig` | app slug; used for `@pig` mentions and bot self-detection |
 | `PIG_PORT` | `8787` | webhook/HTTP port |
-| `PIG_DATABASE_PATH` | `./data/pig.sqlite` | durable job database |
+| `PIG_DATABASE_PATH` | `./data/pig.sqlite` | durable `pi-durable` storage (tasks, conversations, docs) |
 | `PIG_WORKSPACE_ROOT` | `./data/workspaces` | throwaway checkouts |
-| `PIG_MODEL` | Pi default | e.g. `sonnet:high` |
-| `PIG_THINKING` | Pi default | `off`, `low`, `medium`, `high`, … |
-| `PIG_PI_BIN` | `pi` | Pi executable |
-| `PIG_MAX_CONCURRENCY` | `2` | concurrent jobs across different repositories |
-| `PIG_JOB_TIMEOUT_MINUTES` | `30` | hard agent timeout cap |
+| `PIG_TABLE_PREFIX` | `pig_` | SQLite table prefix; keep it stable once data exists |
+| `PIG_MODEL` | first available model | `provider/modelId`, a bare/fuzzy model id or name, or either with `:thinking` |
+| `PIG_THINKING` | model default / suffix | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
+| `PIG_JOB_TIMEOUT_MINUTES` | `30` | hard cap for one agent run |
 | `PIG_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `PIG_ADMIN_TOKEN` | unset | enables authenticated job inspection endpoints |
 
-Model credentials are supplied to Pi through provider environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, …). The server passes only provider variables and basic process variables to the agent; it strips `PIG_*`, `GITHUB_*`, and `GH_*`.
+Model credentials are read by `pi-ai` from the process environment. Typical keys are `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, and provider-specific Amazon Bedrock or Vertex AI variables. See [Pi's provider documentation](https://github.com/earendil-works/pi/blob/main/packages/ai/README.md#environment-variables).
+
+`PIG_MODEL` accepts a provider-qualified reference (`anthropic/claude-sonnet-4-5`), a bare or fuzzy model id/name, and an optional `:thinking` suffix (`sonnet:high`). Without a configured model, PiG uses the first model whose provider has credentials. Repository `.pig.yml` overrides `PIG_MODEL` per repository.
+
+> **One process owns one storage file.** `pi-durable` has no cross-process locking. Run one PiG instance per `PIG_DATABASE_PATH`; put it behind a supervisor or container restart policy. Do not share the SQLite file over a network filesystem.
 
 ## Run locally
 
@@ -129,7 +126,7 @@ Install the App on a test repository and try:
 
 ## Deploy
 
-The included Dockerfile runs the server as a non-root user, installs Git, and pins Pi `1.5.0`.
+The included Dockerfile builds the app with its embedded `pi-durable` runtime, runs as a non-root user, and needs only Git and CA certificates at runtime.
 
 ```bash
 cp .env.example .env
@@ -142,9 +139,9 @@ docker compose up --build -d
 - mount the `.pem` and set `PIG_GITHUB_PRIVATE_KEY_PATH=/run/secrets/pig.pem`, or
 - put the full key in `PIG_GITHUB_PRIVATE_KEY` with `\n` escapes.
 
-Put the service behind HTTPS (reverse proxy, ingress, or a platform load balancer), then point the GitHub App webhook at the public URL. Set `PIG_MAX_CONCURRENCY` conservatively: each agent can use substantial CPU, memory, and network.
+Put the service behind HTTPS, then point the GitHub App webhook at the public URL. Because one process owns the storage, run exactly one replica per database.
 
-The SQLite database and workspace directory live under `/data`. Workspaces are deleted after each job; the database and its WAL files are the durable state.
+The SQLite database and workspace directory live under `/data`. Workspaces are cleaned up after terminal jobs; the database is the durable state. Back it up with its WAL files while the process is stopped, or use a SQLite-consistent snapshot.
 
 ## Commands
 
@@ -157,7 +154,7 @@ The SQLite database and workspace directory live under `/data`. Workspaces are d
 | `@pig release major\|minor\|patch` | Bump the latest semantic version. |
 | `@pig release 1.2.3` | Exact version. `--draft` and `--prerelease` are accepted. |
 | `@pig status` | Recent jobs, attempts, age, and error/result summary. |
-| `@pig cancel` | Cancel queued jobs and abort the running job. |
+| `@pig cancel` | Cancel queued/waiting/sleeping jobs and stop the running job. |
 | `@pig help` | Usage reminder. |
 
 `/pig` works as an alias.
@@ -172,7 +169,7 @@ Add `.pig.yml` on the default branch:
 version: 1
 
 agent:
-  model: sonnet:high
+  model: anthropic/claude-sonnet-4-5
   thinking: high
   timeout_minutes: 30
 
@@ -199,33 +196,36 @@ Behavior details, defaults, and edge cases are specified in [ARCHITECTURE.md](AR
 
 ## How durability works
 
-- **Webhook dedupe** — GitHub delivery IDs are stored; replays are ignored.
-- **Idempotent commands** — one job per comment/event, enforced by a unique key.
-- **Leases and heartbeats** — a crashed worker's job is requeued after its lease expires.
-- **Checkpoints** — a release plan is recorded before the tag is created, a pushed commit is recorded before PR bookkeeping, and a posted review URL is recorded when the review succeeds. Retries resume instead of rebuilding.
-- **Per-repository serialization** — one agent job per repository prevents branch and release races. Control commands bypass the lock.
-- **Progress comments** — one comment per job, edited in place.
-- **Graceful shutdown** — active attempts are aborted and requeued without burning an attempt.
+PiG has one durable model, supplied by `pi-durable`:
+
+- **Admission** — a webhook delivery and its command are committed in one SQLite transaction. A replayed delivery is a duplicate; a repeated command key reuses the same task.
+- **Task per command** — work, review, release, and control commands are durable `pig.job` tasks. Each task owns a phase state, retry budget, and app state.
+- **Conversation per attempt** — a work or review agent runs as its own `pi-durable` conversation owned by the job task. Every turn, model request, and tool call is checkpointed before it is shown. A crash resumes the run instead of restarting the agent.
+- **Per-repository chain** — agent jobs for one repository run in admission order by waiting on the previous job task. Control jobs bypass the chain.
+- **Checkpoints** — pushed commits, posted review URLs, and release plans are recorded in durable state before dependent side effects, so retries resume rather than duplicate.
+- **Retries** — transient failures end a phase `sleeping` with backoff; the task resumes at its checkpoint. A crash loop is bounded by `pi-durable`'s restart limit.
+- **Cancellation** — `@pig cancel` aborts live repository tasks. Aborting a task cascades to its owned agent conversation and then runs the job's abort handler.
+- **Progress comments** — one comment per job, edited in place. Automatic reviews stay silent unless they post a review.
+- **Graceful shutdown** — closing the harness signals running phases. A phase that has not reached a terminal state remains durable and resumes when the process reopens the storage.
 
 ## Operations
 
-- `GET /healthz` — liveness and uptime.
+- `GET /healthz` — liveness, uptime, and active job count.
 - `GET /api/jobs?repo=owner/name&limit=20` — requires `Authorization: Bearer $PIG_ADMIN_TOKEN`.
-- `GET /api/jobs/:id` — job record plus event log; same auth.
-- Logs go to stdout/stderr. Job logs include event history for the last 200 events per job.
-- Back up `PIG_DATABASE_PATH` (and its WAL) together with the `/data` volume. Stop the process or use a SQLite-consistent backup.
+- `GET /api/jobs/:id` — job summary, request, events, and progress comment id; same auth.
+- Logs go to stdout/stderr. `pi-durable` reports are logged with their task kind and error.
+- Back up `PIG_DATABASE_PATH` (and its WAL) under `/data`. `PIG_TABLE_PREFIX` must stay unchanged.
 - To rotate the App key or webhook secret: update the environment, restart, and update GitHub App settings.
-
-SQLite and the workspace directory must be local to one host. Several workers on that host can share the database through leases; do not put the SQLite file on a network filesystem.
 
 ## Security
 
 PiG is an automation tool, not a sandbox boundary.
 
 - Repository content, issues, PR bodies, and review comments are untrusted input. Prompt injection is possible. The agent is instructed to treat repo text as data, but that is not a guarantee.
-- Work jobs deliberately give the agent shell and network access so it can run tests and inspect a project. A malicious repository could read anything the PiG process can read.
-- Model provider keys are passed to the agent because Pi needs them. Use a dedicated model key with a budget, and do not co-locate unrelated secrets on the host.
-- The GitHub App private key, webhook secret, admin token, and installation token are not passed to the agent's environment. Git uses a short-lived askpass file around host operations, with hooks and credential helpers disabled and the local Git config reset after the agent exits.
+- Work jobs give the agent file access and a shell so it can run tests and inspect a project. The shell receives a minimal environment: no `PIG_*`, `GITHUB_*`, `GH_*`, model keys, package registry tokens, or other host secrets. The agent can still read files the PiG process can read, including dotfiles and provider config on disk.
+- Review jobs have no shell: they can read files and write only `.pig/review.json`.
+- Model provider credentials stay in the PiG process for `pi-ai`; they are not placed in the agent's shell environment.
+- The GitHub App private key, webhook secret, admin token, and installation token are not placed in the agent's shell environment. Git uses a short-lived askpass file around host operations, with hooks and credential helpers disabled and the local Git config reset after the agent exits.
 - Run PiG in a container or dedicated host, as a non-root user, with only the data volume mounted. Restrict egress if your threat model requires it.
 - Keep App permissions minimal and install PiG only on trusted repositories.
 - PiG never pushes to the default branch, never force-pushes an existing PR branch, and reverts workflow-file edits unless explicitly allowed.
@@ -243,15 +243,17 @@ Layout:
 
 ```
 src/
-  agent/        Pi subprocess runner and result contracts
+  durable/      pi-durable app: Harness, job task, admission, docs, model resolution, tools
+  jobs/         GitHub job handlers (work, review, release, control) and contracts
   github/       App auth, repository metadata, .pig.yml loading
-  jobs/         SQLite store, worker, durable job handlers
-  webhooks/     signature verification, command parsing, event routing
+  webhooks/     signature verification, command parsing, webhook planning
   diff.ts       unified diff indexing and inline-line validation
   semver.ts     version handling and release-note grouping
   server.ts     HTTP/webhook/admin server
-test/           node:test coverage for the pure logic and queue
+test/           node:test coverage, including MemoryStorage + faux-provider integration tests
 ```
+
+Tests use `node --test` with Node's TypeScript type stripping. Import source files with explicit `.ts` extensions; `rewriteRelativeImportExtensions` converts them on build. Durable tests use `MemoryStorage`, faux providers, and local bare Git repositories, so they need no GitHub or model credentials.
 
 ## License
 

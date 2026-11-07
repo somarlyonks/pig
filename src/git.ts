@@ -127,17 +127,6 @@ esac
 	}
 }
 
-export function createWorkspace(workspaceRoot: string, jobId: string): string {
-	const path = join(workspaceRoot, jobId);
-	rmSync(path, { recursive: true, force: true });
-	mkdirSync(path, { recursive: true });
-	return path;
-}
-
-export function removeWorkspace(path: string): void {
-	rmSync(path, { recursive: true, force: true });
-}
-
 export function assertSafeGitRef(ref: string): void {
 	if (
 		ref.length === 0 ||
@@ -152,7 +141,7 @@ export function assertSafeGitRef(ref: string): void {
 	}
 }
 
-function repositoryUrl(fullName: string): string {
+export function repositoryUrl(fullName: string): string {
 	return `https://github.com/${fullName}.git`;
 }
 
@@ -174,6 +163,7 @@ export interface PrepareRepositoryOptions {
 	detached?: boolean;
 	localBranch?: string;
 	depth?: number;
+	remoteUrl?: string | undefined;
 }
 
 export async function prepareRepository(options: PrepareRepositoryOptions): Promise<void> {
@@ -186,7 +176,7 @@ export async function prepareRepository(options: PrepareRepositoryOptions): Prom
 	}
 	mkdirSync(options.dir, { recursive: true });
 	await runGit(["init", "-q"], { cwd: options.dir, signal: options.signal });
-	await runGit(["remote", "add", "origin", repositoryUrl(options.fullName)], {
+	await runGit(["remote", "add", "origin", options.remoteUrl ?? repositoryUrl(options.fullName)], {
 		cwd: options.dir,
 		signal: options.signal,
 	});

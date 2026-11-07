@@ -12,11 +12,8 @@ export interface AppConfig {
 	workspaceRoot: string;
 	model: string | undefined;
 	thinking: string | undefined;
-	piBin: string;
-	maxConcurrency: number;
+	tablePrefix: string;
 	jobTimeoutMs: number;
-	leaseMs: number;
-	heartbeatMs: number;
 	logLevel: LogLevel;
 	adminToken: string | undefined;
 }
@@ -65,11 +62,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
 	);
 
 	const jobTimeoutMinutes = readPositiveInteger(env, "PIG_JOB_TIMEOUT_MINUTES", 30);
-	const heartbeatMs = readPositiveInteger(env, "PIG_HEARTBEAT_SECONDS", 20) * 1000;
-	const leaseMs = Math.max(
-		readPositiveInteger(env, "PIG_LEASE_SECONDS", 120) * 1000,
-		heartbeatMs * 3,
-	);
+	const tablePrefix = env.PIG_TABLE_PREFIX === undefined ? "pig_" : env.PIG_TABLE_PREFIX.trim();
+	if (tablePrefix !== "" && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(tablePrefix)) {
+		throw new Error("PIG_TABLE_PREFIX must be a SQLite identifier prefix");
+	}
+	if (tablePrefix.startsWith("sqlite_")) {
+		throw new Error("PIG_TABLE_PREFIX cannot start with sqlite_");
+	}
 
 	const logLevelRaw = env.PIG_LOG_LEVEL?.trim() || "info";
 	if (!isLogLevel(logLevelRaw)) {
@@ -91,11 +90,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
 		workspaceRoot,
 		model: env.PIG_MODEL?.trim() || undefined,
 		thinking: env.PIG_THINKING?.trim() || undefined,
-		piBin: env.PIG_PI_BIN?.trim() || "pi",
-		maxConcurrency: readPositiveInteger(env, "PIG_MAX_CONCURRENCY", 2),
+		tablePrefix,
 		jobTimeoutMs: jobTimeoutMinutes * 60 * 1000,
-		leaseMs,
-		heartbeatMs,
 		logLevel: logLevelRaw,
 		adminToken: env.PIG_ADMIN_TOKEN?.trim() || undefined,
 	};

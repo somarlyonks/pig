@@ -1,21 +1,90 @@
 import type { Octokit } from "@octokit/rest";
-import type { AgentRunner } from "../agent/runner.ts";
+import type { ModelRef } from "@earendil-works/pi-durable";
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { RepositoryInfo } from "../github/repo.ts";
 import type { Logger } from "../logger.ts";
 import type { RepoConfig } from "../repo-config.ts";
-import type { JobStore } from "./store.ts";
-import type { JobRequest, JobRow } from "./types.ts";
+import type { JobKind, JobRequest } from "./types.ts";
+
+export interface JobInfo {
+	id: string;
+	installationId: number;
+	repo: string;
+	kind: JobKind;
+	attempts: number;
+	maxAttempts: number;
+	createdAt: number;
+}
+
+export type AgentToolSet = "work" | "review";
+
+export interface AgentRunOptions {
+	cwd: string;
+	prompt: string;
+	tools: AgentToolSet;
+	timeoutMs: number;
+	signal: AbortSignal;
+	onLog?: (message: string) => void;
+}
+
+export type AgentRunStatus = "done" | "failed" | "timeout" | "aborted";
+
+export interface AgentRunResult {
+	status: AgentRunStatus;
+	finalText: string;
+	error: string | null;
+	retryable: boolean;
+}
 
 export interface AgentSettings {
-	model: string | null;
-	thinking: string | null;
+	model: ModelRef | null;
+	thinking: ModelThinkingLevel | null;
 	timeoutMs: number;
 }
 
-export interface JobContext {
-	job: JobRow;
+export interface CheckoutRequest {
+	ref: string;
+	localBranch?: string | null;
+	detached?: boolean;
+	depth?: number;
+}
+
+export interface Checkout {
+	repoDir: string;
+	baseSha: string;
+}
+
+export type JobSummaryStatus =
+	| "queued"
+	| "running"
+	| "waiting"
+	| "sleeping"
+	| "succeeded"
+	| "failed"
+	| "cancelled";
+
+export interface JobSummary {
+	id: string;
+	kind: JobKind;
+	status: JobSummaryStatus;
+	attempts: number;
+	maxAttempts: number;
+	createdAt: number;
+	summary: string;
+	error: string | null;
+}
+
+export interface JobDetail {
+	job: JobSummary;
+	repo: string;
 	request: JobRequest;
-	store: JobStore;
+	events: string[];
+	progressCommentId: number | null;
+}
+
+export interface JobContext {
+	job: JobInfo;
+	request: JobRequest;
 	repoInfo: RepositoryInfo;
 	config: RepoConfig;
 	octokit: Octokit;
@@ -25,13 +94,17 @@ export interface JobContext {
 	signal: AbortSignal;
 	workspaceRoot: string;
 	workspaceDir: string;
-	agent: AgentRunner;
+	remoteUrl: string;
+	agent: (options: AgentRunOptions) => Promise<AgentRunResult>;
 	settings: AgentSettings;
 	checkpoint: unknown;
-	setCheckpoint(value: unknown): void;
+	prepareCheckout(request: CheckoutRequest): Promise<Checkout>;
+	setCheckpoint(value: unknown): Promise<void>;
 	getGitToken(): Promise<string>;
-	cancelRepositoryJobs(): { queued: number; running: number };
-	addEvent(level: string, message: string): void;
+	updateProgress(text: string): Promise<void>;
+	cancelRepositoryJobs(): Promise<{ cancelled: number; running: number }>;
+	listJobs(limit: number): Promise<JobSummary[]>;
+	addEvent(level: string, message: string): Promise<void>;
 	now(): number;
 }
 

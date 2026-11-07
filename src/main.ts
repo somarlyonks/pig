@@ -1,13 +1,8 @@
 import { readFileSync } from "node:fs";
 import { loadConfig } from "./config.ts";
-import { createGitHubClients } from "./github/app.ts";
-import { RepoConfigLoader } from "./github/repo-config.ts";
-import { runPiAgent, type AgentRunner } from "./agent/runner.ts";
-import { JobStore } from "./jobs/store.ts";
-import { JobWorker } from "./jobs/worker.ts";
+import { openPigApp } from "./durable/app.ts";
 import { createLogger } from "./logger.ts";
 import { startHttpServer, type RunningServer } from "./server.ts";
-import { handleWebhook } from "./webhooks/handler.ts";
 
 function readVersion(): string {
 	try {
@@ -25,47 +20,29 @@ async function main(): Promise<void> {
 	const logger = createLogger(config.logLevel);
 	const version = readVersion();
 
-	const store = new JobStore(config.databasePath);
-	const clients = createGitHubClients(config, logger);
-	const configLoader = new RepoConfigLoader(30, logger);
-	const agentRunner: AgentRunner = (options) => runPiAgent(config.piBin, options);
-	const worker = new JobWorker({
-		config,
-		store,
-		clients,
-		configLoader,
-		agentRunner,
-		logger,
-	});
-
-	const handle = (input: Parameters<typeof handleWebhook>[1]) =>
-		handleWebhook(
-			{
-				store,
-				logger,
-				appSlug: config.appSlug,
-			},
-			input,
-		);
-
+	const app = await openPigApp(config, logger);
 	let runningServer: RunningServer | null = null;
 	let shuttingDown = false;
 
-	const shutdown = async (signal: string): Promise<void> => {
+	const shutdown = async (signal: string, exitCode = 0): Promise<void> => {
 		if (shuttingDown) return;
 		shuttingDown = true;
-		logger.info("Shutting down", { signal });
+		logger.info("Shutting down", { signal, exitCode });
 		try {
 			if (runningServer) {
 				await runningServer.close();
 			}
-			await worker.stop();
+			const closed = app.shutdown();
+			const timeout = new Promise<void>((resolve) => {
+				const timer = setTimeout(resolve, 25_000);
+				timer.unref();
+			});
+			await Promise.race([closed, timeout]);
 		} catch (error) {
 			logger.error("Shutdown error", { error });
 		} finally {
-			store.close();
 			logger.info("Shutdown complete");
-			process.exit(0);
+			process.exit(exitCode);
 		}
 	};
 
@@ -76,30 +53,29 @@ async function main(): Promise<void> {
 	});
 	process.on("uncaughtException", (error) => {
 		logger.error("Uncaught exception", { error });
-		void shutdown("uncaughtException");
+		void shutdown("uncaughtException", 1);
 	});
 
-	worker.start();
+	void app.closed.then((end) => {
+		if (end.kind === "failed") {
+			logger.error("Pi-durable session failed; shutting down", { error: end.error });
+			void shutdown("harness failure", 1);
+		}
+	});
+
 	try {
-		runningServer = await startHttpServer({
-			config,
-			store,
-			logger,
-			version,
-			handleWebhook: handle,
-		});
+		runningServer = await startHttpServer({ config, logger, version, app });
 	} catch (error) {
 		logger.error("Could not start HTTP server", { error });
-		await worker.stop();
-		store.close();
+		await app.shutdown().catch(() => undefined);
 		process.exit(1);
 	}
 
 	logger.info("PiG started", {
 		version,
 		appSlug: config.appSlug,
-		concurrency: config.maxConcurrency,
-		piBin: config.piBin,
+		model: config.model ?? "auto",
+		storage: config.databasePath,
 	});
 }
 

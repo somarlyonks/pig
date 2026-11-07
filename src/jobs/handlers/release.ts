@@ -364,7 +364,7 @@ export async function runReleaseJob(context: JobContext): Promise<JobOutcome> {
 			prerelease: request.prerelease ?? targetVersion.prerelease !== null,
 			pullCount: collection.pulls.length,
 		};
-		context.setCheckpoint(checkpoint);
+		await context.setCheckpoint(checkpoint);
 	}
 
 	context.signal.throwIfAborted();
@@ -389,7 +389,7 @@ export async function runReleaseJob(context: JobContext): Promise<JobOutcome> {
 	const existingRelease = await getReleaseByTag(context.octokit, owner, repo, checkpoint.tag);
 	if (existingRelease) {
 		checkpoint.releaseUrl = existingRelease.url;
-		context.setCheckpoint(checkpoint);
+		await context.setCheckpoint(checkpoint);
 		return releaseOutcome(checkpoint, existingRelease.url, true);
 	}
 
@@ -418,7 +418,7 @@ export async function runReleaseJob(context: JobContext): Promise<JobOutcome> {
 	}
 
 	checkpoint.releaseUrl = release.data.html_url;
-	context.setCheckpoint(checkpoint);
+	await context.setCheckpoint(checkpoint);
 	return releaseOutcome(checkpoint, release.data.html_url, false);
 }
 

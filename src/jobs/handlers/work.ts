@@ -10,7 +10,6 @@ import {
 	commitAll,
 	headCommit,
 	listChangedPaths,
-	prepareRepository,
 	resetSoftTo,
 	pushBranch,
 	resetLocalGitConfig,
@@ -18,11 +17,10 @@ import {
 	sanitizeCommitMessage,
 	withGitAskpass,
 } from "../../git.ts";
+import { assertAgentSucceeded } from "../agents.ts";
 import type { JobContext, JobOutcome } from "../context.ts";
 import { PermanentJobError, TransientJobError } from "../errors.ts";
 import type { WorkJobRequest } from "../types.ts";
-
-const WORK_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
 interface WorkCheckpoint {
 	status: "no_changes" | "pushed";
@@ -389,7 +387,7 @@ async function finalizePushedWork(
 	context.signal.throwIfAborted();
 	if (request.source.type === "pull_request") {
 		const url = `https://github.com/${context.repoInfo.fullName}/pull/${request.source.number}`;
-		context.setCheckpoint({
+		await context.setCheckpoint({
 			...checkpoint,
 			prUrl: url,
 			prNumber: request.source.number,
@@ -463,44 +461,23 @@ export async function runWorkJob(context: JobContext): Promise<JobOutcome> {
 			: `${context.config.work.branchPrefix}${request.source.number}-${branchSlug(source.title)}-${context.job.id.slice(0, 8)}`;
 	source.branch = branch;
 
-	const repoDir = join(context.workspaceDir, "repo");
-	await withGitAskpass(async (askpassPath) => {
-		await prepareRepository({
-			dir: repoDir,
-			fullName: context.repoInfo.fullName,
-			ref: source.sourceType === "issue" ? context.repoInfo.defaultBranch : source.headRef,
-			localBranch: branch,
-			auth: { token: await context.getGitToken(), askpassPath },
-			depth: 30,
-			signal: context.signal,
-		});
+	const { repoDir, baseSha } = await context.prepareCheckout({
+		ref: source.sourceType === "issue" ? context.repoInfo.defaultBranch : source.headRef,
+		localBranch: branch,
+		depth: 30,
 	});
-	const baseSha = await headCommit(repoDir, context.signal);
 
 	const prompt = buildWorkPrompt({ context, request, source });
-	context.addEvent("info", "Starting Pi work");
+	await context.addEvent("info", "Starting Pi work");
 	const agentResult = await context.agent({
 		cwd: repoDir,
 		prompt,
-		tools: WORK_TOOLS,
-		model: context.settings.model,
-		thinking: context.settings.thinking,
+		tools: "work",
 		timeoutMs: context.settings.timeoutMs,
 		signal: context.signal,
-		onLog: (message) => context.addEvent("debug", message),
+		onLog: (message) => void context.addEvent("debug", message),
 	});
-
-	if (context.signal.aborted) {
-		throw new Error("Work aborted");
-	}
-	if (agentResult.timedOut) {
-		throw new PermanentJobError("Pi timed out while working on this request.");
-	}
-	if (agentResult.exitCode !== 0) {
-		throw new TransientJobError(
-			`Pi exited with code ${agentResult.exitCode}: ${agentResult.stderr.trim().slice(-1500) || "no diagnostics"}`,
-		);
-	}
+	assertAgentSucceeded(agentResult);
 
 	const result = parseWorkResult(repoDir) ?? parseWorkRecord(extractJsonObject(agentResult.finalText));
 	if (!result && !agentResult.finalText.trim()) {
@@ -560,7 +537,7 @@ export async function runWorkJob(context: JobContext): Promise<JobOutcome> {
 
 	if (!commitSha) {
 		const noChangeSummary = summary || "No changes were needed.";
-		context.setCheckpoint({
+		await context.setCheckpoint({
 			status: "no_changes",
 			branch,
 			summary: noChangeSummary,
@@ -575,7 +552,7 @@ export async function runWorkJob(context: JobContext): Promise<JobOutcome> {
 			cwd: repoDir,
 			branch,
 			force: source.sourceType === "issue",
-			remoteUrl: `https://github.com/${context.repoInfo.fullName}.git`,
+			remoteUrl: context.remoteUrl,
 			auth: { token: await context.getGitToken(), askpassPath },
 			signal: context.signal,
 		});
@@ -590,6 +567,6 @@ export async function runWorkJob(context: JobContext): Promise<JobOutcome> {
 		summary,
 		revertedWorkflows,
 	};
-	context.setCheckpoint(pushed);
+	await context.setCheckpoint(pushed);
 	return finalizePushedWork(context, request, pushed);
 }

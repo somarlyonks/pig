@@ -9,7 +9,7 @@ import {
 	type ReviewResult,
 } from "../../agent/contract.ts";
 import { isValidReviewLocation, isSafeRepositoryPath, parseDiff, summarizeDiff, truncateDiff } from "../../diff.ts";
-import { prepareRepository, withGitAskpass } from "../../git.ts";
+import { assertAgentSucceeded } from "../agents.ts";
 import { skippedOutcome, type JobContext, type JobOutcome } from "../context.ts";
 import { PermanentJobError, TransientJobError } from "../errors.ts";
 import type { ReviewJobRequest } from "../types.ts";
@@ -17,7 +17,6 @@ import type { ReviewJobRequest } from "../types.ts";
 const MAX_DIFF_PARSE_BYTES = 5 * 1024 * 1024;
 const MAX_DIFF_PROMPT_BYTES = 512 * 1024;
 const MAX_FILES = 300;
-const REVIEW_TOOLS = ["read", "grep", "find", "ls", "write"];
 
 interface ChangedFile {
 	filename: string;
@@ -349,7 +348,7 @@ export async function runReviewJob(context: JobContext): Promise<JobOutcome> {
 	);
 	if (existingReview) {
 		const summary = `PiG already reviewed commit ${pullRequest.head.sha.slice(0, 10)}.`;
-		context.setCheckpoint({
+		await context.setCheckpoint({
 			reviewUrl: existingReview.url,
 			headSha: pullRequest.head.sha,
 			summary,
@@ -395,17 +394,10 @@ export async function runReviewJob(context: JobContext): Promise<JobOutcome> {
 	const diffIndex = parseDiff(diffText);
 	const diffForPrompt = truncateDiff(diffText, MAX_DIFF_PROMPT_BYTES);
 
-	const repoDir = join(context.workspaceDir, "repo");
-	await withGitAskpass(async (askpassPath) => {
-		await prepareRepository({
-			dir: repoDir,
-			fullName: context.repoInfo.fullName,
-			ref: `pull/${pullRequest.number}/head`,
-			auth: { token: await context.getGitToken(), askpassPath },
-			detached: true,
-			depth: 10,
-			signal: context.signal,
-		});
+	const { repoDir } = await context.prepareCheckout({
+		ref: `pull/${pullRequest.number}/head`,
+		detached: true,
+		depth: 10,
 	});
 
 	const contextDir = join(repoDir, ".pig", "context");
@@ -447,29 +439,16 @@ export async function runReviewJob(context: JobContext): Promise<JobOutcome> {
 		diffTruncated: diffForPrompt.truncated,
 	});
 
-	context.addEvent("info", "Starting Pi review");
+	await context.addEvent("info", "Starting Pi review");
 	const agentResult = await context.agent({
 		cwd: repoDir,
 		prompt,
-		tools: REVIEW_TOOLS,
-		model: context.settings.model,
-		thinking: context.settings.thinking,
+		tools: "review",
 		timeoutMs: context.settings.timeoutMs,
 		signal: context.signal,
-		onLog: (message) => context.addEvent("debug", message),
+		onLog: (message) => void context.addEvent("debug", message),
 	});
-
-	if (context.signal.aborted) {
-		throw new Error("Review aborted");
-	}
-	if (agentResult.timedOut) {
-		throw new PermanentJobError("Pi timed out while reviewing this pull request.");
-	}
-	if (agentResult.exitCode !== 0) {
-		throw new TransientJobError(
-			`Pi exited with code ${agentResult.exitCode}: ${agentResult.stderr.trim().slice(-1500) || "no diagnostics"}`,
-		);
-	}
+	assertAgentSucceeded(agentResult);
 
 	const parsed =
 		parseReviewResult(repoDir) ??
@@ -552,7 +531,7 @@ export async function runReviewJob(context: JobContext): Promise<JobOutcome> {
 	}
 
 	const summary = `Reviewed pull request #${pullRequest.number}: ${normalized.inline.length} inline finding${normalized.inline.length === 1 ? "" : "s"}, ${normalized.demoted.length} not posted inline.`;
-	context.setCheckpoint({
+	await context.setCheckpoint({
 		reviewUrl,
 		headSha: pullRequest.head.sha,
 		summary,

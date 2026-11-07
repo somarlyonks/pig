@@ -1,5 +1,5 @@
-import type { JobContext, JobOutcome } from "../context.ts";
-import type { ControlJobRequest, JobRow } from "../types.ts";
+import type { JobContext, JobOutcome, JobSummary } from "../context.ts";
+import type { ControlJobRequest } from "../types.ts";
 
 const HELP_TEXT = `### PiG — Pi-durable In GitHub
 
@@ -28,24 +28,20 @@ function escapeTableCell(value: string): string {
 	return value.replace(/\|/g, "\\|").replace(/\s+/g, " ").trim();
 }
 
-function jobDetail(job: JobRow): string {
+function jobDetail(job: JobSummary): string {
 	if (job.error) return job.error;
-	const result = job.result;
-	if (typeof result === "object" && result !== null && "summary" in result) {
-		const summary = (result as { summary?: unknown }).summary;
-		if (typeof summary === "string" && summary.trim()) return summary;
-	}
+	if (job.summary) return job.summary;
 	if (job.status === "running") return "running";
 	if (job.status === "queued") return "waiting for a worker";
+	if (job.status === "waiting") return "waiting for the previous job";
+	if (job.status === "sleeping") return "waiting to retry";
 	return "";
 }
 
-function renderStatus(ctx: JobContext): string {
-	const jobs = ctx.store.getJobsForRepo(ctx.repoInfo.fullName, 10);
+function renderStatus(jobs: JobSummary[], now: number): string {
 	if (jobs.length === 0) {
 		return "### PiG status\n\nNo jobs have run for this repository yet.";
 	}
-	const now = ctx.now();
 	const lines = [
 		"### PiG status",
 		"",
@@ -69,11 +65,11 @@ export async function runControlJob(ctx: JobContext): Promise<JobOutcome> {
 			comment = HELP_TEXT;
 			break;
 		case "status":
-			comment = renderStatus(ctx);
+			comment = renderStatus(await ctx.listJobs(10), ctx.now());
 			break;
 		case "cancel": {
-			const counts = ctx.cancelRepositoryJobs();
-			comment = `### Cancellation requested\n\nCancelled ${counts.queued} queued job${counts.queued === 1 ? "" : "s"}. ${
+			const counts = await ctx.cancelRepositoryJobs();
+			comment = `### Cancellation requested\n\nCancelled ${counts.cancelled} job${counts.cancelled === 1 ? "" : "s"}. ${
 				counts.running > 0
 					? `${counts.running} running job${counts.running === 1 ? " is" : "s are"} stopping now.`
 					: "No jobs were running."
@@ -84,7 +80,8 @@ export async function runControlJob(ctx: JobContext): Promise<JobOutcome> {
 			comment = request.message ?? "PiG could not understand that command. Try `@pig help`.";
 			break;
 	}
-	const summary = request.action === "cancel" ? "Cancellation requested" : `Control command: ${request.action}`;
+	const summary =
+		request.action === "cancel" ? "Cancellation requested" : `Control command: ${request.action}`;
 	return {
 		comment,
 		summary,
