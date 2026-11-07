@@ -1,0 +1,22 @@
+services:
+  pig:
+    build: .
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 25s
+    env_file:
+      - .env
+    environment:
+      PIG_PORT: ${PIG_PORT:-8787}
+      PIG_DATABASE_PATH: /data/pig.sqlite
+      PIG_WORKSPACE_ROOT: /data/workspaces
+    ports:
+      - "${PIG_PORT:-8787}:${PIG_PORT:-8787}"
+    volumes:
+      - pig-data:/data
+      # To use a private key file instead of an inline key:
+      # - ./github-app.pem:/run/secrets/pig.pem:ro
+      # and set PIG_GITHUB_PRIVATE_KEY_PATH=/run/secrets/pig.pem in .env
+
+volumes:
+  pig-data:
