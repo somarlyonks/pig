@@ -82,7 +82,7 @@ export interface JobDetail {
 	progressCommentId: number | null;
 }
 
-export interface JobContext {
+export interface OrchestrationContext {
 	job: JobInfo;
 	request: JobRequest;
 	repoInfo: RepositoryInfo;
@@ -92,20 +92,23 @@ export interface JobContext {
 	appId: number;
 	logger: Logger;
 	signal: AbortSignal;
-	workspaceRoot: string;
-	workspaceDir: string;
-	remoteUrl: string;
-	agent: (options: AgentRunOptions) => Promise<AgentRunResult>;
-	settings: AgentSettings;
 	checkpoint: unknown;
-	prepareCheckout(request: CheckoutRequest): Promise<Checkout>;
 	setCheckpoint(value: unknown): Promise<void>;
-	getGitToken(): Promise<string>;
 	updateProgress(text: string): Promise<void>;
 	cancelRepositoryJobs(): Promise<{ cancelled: number; running: number }>;
 	listJobs(limit: number): Promise<JobSummary[]>;
 	addEvent(level: string, message: string): Promise<void>;
 	now(): number;
+}
+
+export interface JobContext extends OrchestrationContext {
+	settings: AgentSettings;
+	prepareCheckout(request: CheckoutRequest): Promise<Checkout>;
+	workspaceRoot: string;
+	workspaceDir: string;
+	remoteUrl: string;
+	getGitToken(): Promise<string>;
+	agent: (options: AgentRunOptions) => Promise<AgentRunResult>;
 }
 
 export interface JobOutcome {

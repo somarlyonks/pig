@@ -1,9 +1,9 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ConversationId, Harness, Task } from "@earendil-works/pi-durable";
 import type { Logger } from "../logger.ts";
-import { planWebhook } from "../webhooks/plan.ts";
+import { planWebhook, type WebhookPlan, type AdmissionPlan } from "../webhooks/plan.ts";
 import { CommandDoc, DeliveryDoc, JobDoc, RepoDoc } from "./docs.ts";
-import type { JobTaskInput } from "./job-task.ts";
+import type { JobTaskInput } from "./task-types.ts";
 
 export interface WebhookInput {
 	event: string;
@@ -22,6 +22,31 @@ export interface AdmissionDeps<S extends { phase: string }, R> {
 	appSlug: string;
 	logger: Logger;
 	task: Task<JobTaskInput, S, R, object>;
+	filterPlan?: (plan: WebhookPlan) => WebhookPlan;
+}
+
+export function admissionNotice(
+	admission: AdmissionPlan,
+	message: string,
+): AdmissionPlan {
+	const base = admission.request;
+	return {
+		installationId: admission.installationId,
+		repo: admission.repo,
+		jobKind: "control",
+		request: {
+			kind: "control",
+			action: "notice",
+			message,
+			actor: base.actor,
+			source: base.source,
+			trigger: base.trigger,
+			receivedAt: base.receivedAt,
+		},
+		idempotencyKey: `${admission.idempotencyKey}:unsupported`,
+		maxAttempts: 1,
+		chained: false,
+	};
 }
 
 function deliveryKey(deliveryId: string): string {
@@ -37,7 +62,8 @@ export async function admitWebhook<S extends { phase: string }, R>(
 	input: WebhookInput,
 ): Promise<WebhookResult> {
 	const now = Date.now();
-	const plan = planWebhook(input.event, input.payload, deps.appSlug, now);
+	const planned = planWebhook(input.event, input.payload, deps.appSlug, now);
+	const plan = deps.filterPlan ? deps.filterPlan(planned) : planned;
 
 	const outcome = await deps.harness.commit(async (tx) => {
 		const delivery = await tx.doc(DeliveryDoc, deliveryKey(input.deliveryId), null);

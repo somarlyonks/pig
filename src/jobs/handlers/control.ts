@@ -1,4 +1,4 @@
-import type { JobContext, JobOutcome, JobSummary } from "../context.ts";
+import type { JobOutcome, JobSummary, OrchestrationContext } from "../context.ts";
 import type { ControlJobRequest } from "../types.ts";
 
 const HELP_TEXT = `### PiG — Pi-durable In GitHub
@@ -57,7 +57,7 @@ function renderStatus(jobs: JobSummary[], now: number): string {
 	return lines.join("\n");
 }
 
-export async function runControlJob(ctx: JobContext): Promise<JobOutcome> {
+export async function runControlJob(ctx: OrchestrationContext): Promise<JobOutcome> {
 	const request = ctx.request as ControlJobRequest;
 	let comment: string;
 	switch (request.action) {

@@ -36,6 +36,7 @@ import {
 	toJobError,
 	truncateError,
 } from "../jobs/errors.ts";
+import { assertAuthorized } from "./authorization.ts";
 import { runControlJob } from "../jobs/handlers/control.ts";
 import { runReleaseJob } from "../jobs/handlers/release.ts";
 import { runReviewJob } from "../jobs/handlers/review.ts";
@@ -46,29 +47,24 @@ import type { RepoConfig } from "../repo-config.ts";
 import { ModelResolutionError, resolveModel } from "./models.ts";
 import { runDurableAgent } from "./agent.ts";
 import { JobDoc, appendEvent, type JobDocValue } from "./docs.ts";
+import {
+	ackText,
+	backoffForAttempt,
+	safeUpdateProgress,
+	shouldAck,
+	shouldReportFailure,
+} from "./failure.ts";
+import { jobKey, readJobDoc } from "./job-docs.ts";
+import { ProgressComment } from "./progress.ts";
+import {
+	JOB_TASK_NAME,
+	type JobTaskInput,
+	type JobTaskCheckpoint,
+	type JobTaskResult,
+} from "./task-types.ts";
 
-export const JOB_TASK_NAME = "pig.job";
-
-export interface JobTaskInput {
-	installationId: number;
-	repo: string;
-	request: JobRequest;
-	idempotencyKey: string;
-	maxAttempts: number;
-	previousTaskId: number | null;
-	createdAt: number;
-}
-
-export interface JobTaskCheckpoint {
-	phase: "run";
-	previousTaskId: number | null;
-	attempt: number;
-}
-
-export interface JobTaskResult {
-	summary: string;
-	result: Record<string, JsonValue>;
-}
+export { JOB_TASK_NAME };
+export type { JobTaskInput, JobTaskCheckpoint, JobTaskResult };
 
 export type JobTaskDefinition = Task<
 	JobTaskInput,
@@ -96,66 +92,6 @@ interface CheckoutMarker {
 	baseSha: string;
 }
 
-function jobKey(taskId: TaskId): string {
-	return String(taskId);
-}
-
-function emptyJobDoc(): JobDocValue {
-	return {
-		status: "queued",
-		checkpoint: null,
-		progressCommentId: null,
-		conversationId: null,
-		conversationAttempt: 0,
-		attempt: 1,
-		summary: null,
-		error: null,
-		events: [],
-		updatedAt: 0,
-	};
-}
-
-async function readJobDoc(
-	deps: JobTaskDeps,
-	taskId: TaskId,
-	context: Context,
-): Promise<JobDocValue> {
-	const value = await deps.harness.snapshot(JobDoc, jobKey(taskId), context);
-	return value ? { ...emptyJobDoc(), ...value } : emptyJobDoc();
-}
-
-function shouldAck(request: JobRequest): boolean {
-	if (request.kind === "control") return false;
-	if (request.kind === "review" && request.auto) return false;
-	return true;
-}
-
-function shouldReportFailure(request: JobRequest): boolean {
-	return !(request.kind === "review" && request.auto);
-}
-
-function ackText(request: JobRequest): string {
-	switch (request.kind) {
-		case "work":
-			return "PiG is working on this request.";
-		case "review":
-			return "PiG is reviewing this pull request.";
-		case "release":
-			return "PiG is preparing the release.";
-		case "control":
-			return "";
-	}
-}
-
-function backoffForAttempt(attempt: number): number {
-	return Math.min(120_000, 15_000 * 2 ** Math.max(0, attempt - 1));
-}
-
-function truncateComment(text: string): string {
-	const trimmed = text.trim();
-	return trimmed.length > 60_000 ? `${trimmed.slice(0, 59_999)}…` : trimmed;
-}
-
 function cleanupWorkspace(deps: JobTaskDeps, taskId: TaskId): void {
 	try {
 		rmSync(join(deps.config.workspaceRoot, jobKey(taskId)), {
@@ -164,74 +100,6 @@ function cleanupWorkspace(deps: JobTaskDeps, taskId: TaskId): void {
 		});
 	} catch (error) {
 		deps.logger.warn("Could not remove the job workspace", { taskId, error });
-	}
-}
-
-interface ProgressRepo {
-	owner: string;
-	name: string;
-}
-
-class ProgressComment {
-	private id: number | null;
-	private readonly octokit: Octokit;
-	private readonly repoInfo: ProgressRepo;
-	private readonly issueNumber: number;
-	private readonly onCreated: (id: number) => Promise<void>;
-	private readonly logger: Logger;
-
-	constructor(options: {
-		octokit: Octokit;
-		repoInfo: ProgressRepo;
-		issueNumber: number;
-		initialId: number | null;
-		onCreated: (id: number) => Promise<void>;
-		logger: Logger;
-	}) {
-		this.octokit = options.octokit;
-		this.repoInfo = options.repoInfo;
-		this.issueNumber = options.issueNumber;
-		this.onCreated = options.onCreated;
-		this.logger = options.logger;
-		this.id = options.initialId;
-	}
-
-	async update(body: string): Promise<void> {
-		const text = truncateComment(body);
-		if (this.id === null) {
-			await this.create(text);
-			return;
-		}
-		try {
-			await this.octokit.issues.updateComment({
-				owner: this.repoInfo.owner,
-				repo: this.repoInfo.name,
-				comment_id: this.id,
-				body: text,
-			});
-		} catch (error) {
-			if ((error as { status?: number }).status === 404) {
-				this.id = null;
-				await this.create(text);
-				return;
-			}
-			this.logger.warn("Could not update progress comment", { error });
-		}
-	}
-
-	private async create(text: string): Promise<void> {
-		try {
-			const { data } = await this.octokit.issues.createComment({
-				owner: this.repoInfo.owner,
-				repo: this.repoInfo.name,
-				issue_number: this.issueNumber,
-				body: text,
-			});
-			this.id = data.id;
-			await this.onCreated(data.id);
-		} catch (error) {
-			this.logger.warn("Could not create progress comment", { error });
-		}
 	}
 }
 
@@ -259,37 +127,6 @@ async function getInstallationToken(
 		expiresAt: Number.isFinite(expiresAt) ? expiresAt : Date.now() + 50 * 60_000,
 	});
 	return data.token;
-}
-
-async function assertAuthorized(
-	octokit: Octokit,
-	repoInfo: RepositoryInfo,
-	actor: string,
-	config: RepoConfig,
-	logger: Logger,
-): Promise<void> {
-	if (config.permissions.allow.includes(actor.toLowerCase())) {
-		return;
-	}
-	let allowed = false;
-	try {
-		const { data } = await octokit.repos.getCollaboratorPermissionLevel({
-			owner: repoInfo.owner,
-			repo: repoInfo.name,
-			username: actor,
-		});
-		allowed = ["admin", "maintain", "write", "push"].includes(data.permission.toLowerCase());
-	} catch (error) {
-		if ((error as { status?: number }).status !== 404) {
-			throw error;
-		}
-	}
-	if (!allowed) {
-		logger.info("Authorization denied", { actor });
-		throw new PermanentJobError(
-			`@${actor} needs write access to this repository to use PiG.`,
-		);
-	}
 }
 
 async function resolveSettings(
@@ -602,20 +439,6 @@ function runHandler(request: JobRequest, context: JobContext): Promise<JobOutcom
 	}
 }
 
-async function safeUpdate(
-	progress: ProgressComment | null,
-	request: JobRequest,
-	render: () => string,
-	logger: Logger,
-): Promise<void> {
-	if (!progress || !shouldReportFailure(request)) return;
-	try {
-		await progress.update(render());
-	} catch (error) {
-		logger.warn("Could not update the progress comment", { error });
-	}
-}
-
 async function handleFailure(
 	deps: JobTaskDeps,
 	task: RunningTask<JobTaskInput, JobTaskCheckpoint, JobTaskResult>,
@@ -639,7 +462,7 @@ async function handleFailure(
 	if (jobError.retryable && state.attempt < input.maxAttempts) {
 		const nextAttempt = state.attempt + 1;
 		const until = runtime.now() + backoffForAttempt(state.attempt);
-		await safeUpdate(
+		await safeUpdateProgress(
 			progress,
 			input.request,
 			() =>
@@ -665,7 +488,7 @@ async function handleFailure(
 		return;
 	}
 
-	await safeUpdate(
+	await safeUpdateProgress(
 		progress,
 		input.request,
 		() => `PiG could not complete this request: ${message}`,
@@ -716,7 +539,7 @@ async function runPhase(
 		return undefined;
 	}, context);
 
-	const jobDoc = await readJobDoc(deps, task.id, context);
+	const jobDoc = await readJobDoc(deps.harness, task.id, context);
 	const progress = createProgress(deps, task, runtime, context, jobDoc);
 	let prepared: PreparedJob | null = null;
 	try {
@@ -769,7 +592,7 @@ async function abortPhase(
 	context: Context,
 ): Promise<void> {
 	const input = task.input;
-	const jobDoc = await readJobDoc(deps, task.id, context);
+	const jobDoc = await readJobDoc(deps.harness, task.id, context);
 	if (jobDoc.conversationId !== null) {
 		try {
 			const conversation = await deps.harness.conversation(

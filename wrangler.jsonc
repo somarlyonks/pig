@@ -1,0 +1,23 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "pig",
+	"main": "src/cloudflare/worker.ts",
+	"compatibility_date": "2026-11-01",
+	"compatibility_flags": ["nodejs_compat"],
+	"durable_objects": {
+		"bindings": [{ "name": "REPOS", "class_name": "RepoDurableObject" }]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["RepoDurableObject"]
+		}
+	],
+	"vars": {
+		"PIG_APP_SLUG": "pig",
+		"PIG_TABLE_PREFIX": "pig_"
+	},
+	"observability": {
+		"enabled": true
+	}
+}

@@ -7,3 +7,6 @@ data/
 *.sqlite-wal
 .DS_Store
 *.pem
+dist-cloudflare/
+.wrangler/
+.dev.vars

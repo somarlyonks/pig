@@ -4,7 +4,7 @@ import { createHmac } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import type { Harness } from "@earendil-works/pi-durable";
 import type { AppConfig } from "../src/config.ts";
-import type { PigApp } from "../src/durable/app.ts";
+import type { PigApp } from "../src/durable/runtime-types.ts";
 import type { JobDetail, JobSummary } from "../src/jobs/context.ts";
 import type { Logger } from "../src/logger.ts";
 import { startHttpServer, type RunningServer } from "../src/server.ts";

@@ -42,7 +42,7 @@ PiG never edits a pull request body to add reviews, and never approves by defaul
 
 ## 3. Durable job contract
 
-PiG uses one `pi-durable` Harness over one SQLite storage. One process owns that storage at a time; `pi-durable` has no cross-process locking. The Harness is resumed on startup, which recovers tasks that were cut off by a crash, shutdown, or host failure.
+PiG uses one `pi-durable` Harness over one SQLite storage per host session. On the Node host, one process owns the database. On Cloudflare, one Durable Object owns one repository database. `pi-durable` has no cross-process locking. The Harness is resumed on startup or Durable Object start, which recovers tasks that were cut off by a crash, shutdown, hibernation, or host failure.
 
 ### Admission
 
@@ -189,9 +189,32 @@ permissions:
 
 Configuration is trusted only from the default branch. A PR cannot change PiG's behavior until it is merged.
 
+## 7.1 Deployment hosts
+
+PiG has one durable job model and two hosts.
+
+**Node host (full):**
+
+- One process owns one SQLite storage.
+- The HTTP server verifies webhooks from the raw body with `node:crypto`.
+- Work, review, release, and control jobs run with Node execution tools, local Git operations, and model calls.
+- Retry sleeps use the harness's timers. A graceful shutdown leaves unfinished tasks durable for the next process.
+
+**Cloudflare orchestration host (experimental):**
+
+- A Worker verifies webhooks with WebCrypto and routes each repository to its own Durable Object.
+- The Durable Object owns `pi-durable` SQLite storage and the `pig.orchestration` task. It hibernates while idle and uses its alarm to wake for stored task deadlines and in-flight work.
+- Control and release jobs run fully. `@pig status`, `@pig help`, `@pig cancel`, and releases are supported.
+- Manual work/review commands become a control notice that names the missing coding backend. Automatic reviews are ignored without a comment.
+- No model calls and no coding tools run in this host; it needs no model credentials.
+- State is partitioned per repository, so admin listing and job lookup require a repository name.
+- One repository is one Durable Object and one storage owner.
+
+Both hosts share command planning, admission records, job documents, per-repository chaining, retries, cancellation, checkpoints, and progress comments. The orchestration host uses a separate task kind so its bundle never imports the Node Git/filesystem/agent code.
+
 ## 8. Safety and isolation
 
-- Webhooks require a valid `X-Hub-Signature-256` HMAC. Unsigned or stale deliveries are rejected before parsing.
+- Webhooks require a valid `X-Hub-Signature-256` HMAC. Unsigned or stale deliveries are rejected before parsing. The Node host uses `node:crypto`; the Cloudflare Worker uses WebCrypto.
 - Authorization happens server-side per job. `.pig.yml` may grant named users, but only writers can change that file on the default branch.
 - PiG never pushes to the default branch and never force-pushes an existing pull request branch. It force-pushes only its own deterministic `pig/*` branch for issue work.
 - Host Git operations use a short-lived askpass file created around the operation and removed afterwards. Hooks and credential helpers are disabled; the local Git config is reset after agent work; pushes use an explicit repository URL.
@@ -203,9 +226,11 @@ Configuration is trusted only from the default branch. A PR cannot change PiG's 
 ## 9. Limits and non-goals (v1)
 
 - Single GitHub host (github.com); GitHub Enterprise Server is not configured.
-- One process owns one `pi-durable` SQLite storage. There is no cross-process locking or horizontal scaling. High availability comes from restart and durable resume, not from replicas.
+- One process or Durable Object owns one `pi-durable` SQLite storage. There is no cross-process locking or horizontal scaling. High availability comes from restart/hibernation and durable resume, not from replicas.
+- The Cloudflare host is orchestration-only in v1: work and review require the Node host or a future remote coding execution backend.
 - The app depends on an **experimental** `pi-durable` API. Upgrades may require data migrations; PiG pins an exact version.
 - No web dashboard. GitHub comments, reviews, releases, the status command, and the admin endpoint are the interface.
+- The Cloudflare host has no global admin listing across repository Durable Objects.
 - No package publishing, deployment automation, merge queues, or issue triage.
 - No continuation of the same Pi conversation across separate commands. Every job attempt starts a fresh conversation, while a crash within an attempt resumes it.
 - Automatic review is one pass; PiG does not re-review its own fixes explicitly.

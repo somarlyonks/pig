@@ -1,7 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AppConfig } from "./config.ts";
-import type { PigApp } from "./durable/app.ts";
+import type { PigApp } from "./durable/runtime-types.ts";
 import type { Logger } from "./logger.ts";
 import { verifyWebhookSignature } from "./webhooks/verify.ts";
 

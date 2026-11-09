@@ -1,5 +1,5 @@
 import type { Octokit } from "@octokit/rest";
-import type { JobContext, JobOutcome } from "../context.ts";
+import type { OrchestrationContext, JobOutcome } from "../context.ts";
 import { PermanentJobError } from "../errors.ts";
 import type { ReleaseJobRequest } from "../types.ts";
 import {
@@ -221,7 +221,7 @@ function releaseOutcome(
 	};
 }
 
-export async function runReleaseJob(context: JobContext): Promise<JobOutcome> {
+export async function runReleaseJob(context: OrchestrationContext): Promise<JobOutcome> {
 	const request = context.request as ReleaseJobRequest;
 	const { owner, name: repo } = context.repoInfo;
 	const prefix = context.config.release.tagPrefix;

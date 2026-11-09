@@ -197,7 +197,7 @@ test("chains agent jobs per repository but not control jobs", async () => {
 		const read = async (id: unknown): Promise<JobTaskInput> => {
 			const record = await app.harness.getTask(Number(id) as TaskId, BACKGROUND_CONTEXT);
 			assert.ok(record);
-			return record.input as JobTaskInput;
+			return record.input as unknown as JobTaskInput;
 		};
 		assert.equal((await read(first.body.jobId)).previousTaskId, null);
 		assert.equal((await read(second.body.jobId)).previousTaskId, Number(first.body.jobId));

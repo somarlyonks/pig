@@ -15,10 +15,11 @@ Jobs, conversations, tool calls, checkpoints, and admission records live in `pi-
 
 ## Requirements
 
-- Node.js 24+ (the app and `pi-durable` both require a modern Node)
-- Git
+- Node.js 24+ (the Node host and `pi-durable` both require a modern Node)
+- Git for the Node host
 - A GitHub App with a private key and webhook secret
-- Credentials for a model provider that Pi's `pi-ai` supports
+- Credentials for a model provider that Pi's `pi-ai` supports for work/review
+- Optionally, a Cloudflare account and Wrangler for the serverless orchestration host
 
 The app embeds `pi-durable` and `pi-ai`; it does **not** run the `pi` CLI and does **not** use the CLI's `/login` session state. Configure model credentials with provider environment variables.
 
@@ -143,6 +144,48 @@ Put the service behind HTTPS, then point the GitHub App webhook at the public UR
 
 The SQLite database and workspace directory live under `/data`. Workspaces are cleaned up after terminal jobs; the database is the durable state. Back it up with its WAL files while the process is stopped, or use a SQLite-consistent snapshot.
 
+## Serverless Cloudflare host (experimental)
+
+PiG also ships a Cloudflare Worker + Durable Object host. It follows the model from [Pi Durable on Cloudflare](https://earendil.com/posts/pi-durable-on-cloudflare/): the Worker receives webhooks, and one Durable Object per repository owns the `pi-durable` SQLite state, the job tasks, and the alarm that wakes the object for retries and in-flight work. No always-on server is required.
+
+What runs there:
+
+- **Control and release** jobs work fully.
+- **Manual work/review** commands become a control notice explaining that coding jobs need the Node host or a coding execution backend.
+- **Automatic reviews** are ignored silently.
+- No model calls are made by this host; it does not need model credentials.
+
+Setup:
+
+```bash
+npm run cf:dry-run                 # bundle without deploying
+npx wrangler secret put PIG_GITHUB_APP_ID
+npx wrangler secret put PIG_GITHUB_PRIVATE_KEY   # paste the PEM, newlines escaped or raw
+npx wrangler secret put PIG_WEBHOOK_SECRET
+npx wrangler secret put PIG_ADMIN_TOKEN          # optional
+npm run cf:deploy
+```
+
+Point the GitHub App webhook at `https://<worker-host>/api/github/webhooks`. `PIG_APP_SLUG` and `PIG_TABLE_PREFIX` live in `wrangler.jsonc`; keep the prefix stable.
+
+For local Worker development, put the same values in `.dev.vars` (ignored by Git), then run `npm run cf:dev`. Set `PIG_APP_SLUG` there if your app slug differs from `pig`.
+
+Admin routes require `PIG_ADMIN_TOKEN` and a repository, because state is partitioned per repository:
+
+```text
+GET /api/jobs?repo=owner/name&limit=20
+GET /api/jobs/<id>?repo=owner/name
+```
+
+Limitations:
+
+- Work and review need a real checkout, shell, and Git; a Durable Object cannot run them. A remote execution backend is the next step.
+- Admin listing is per repository, not global.
+- Cloudflare is still a hosted service; the host is serverless and hibernates, not “no cloud at all.”
+- One repository is one Durable Object and one storage owner. Do not point two processes at the same DO storage.
+
+The Node host below remains the full-featured deployment.
+
 ## Commands
 
 | Command | Behavior |
@@ -207,6 +250,7 @@ PiG has one durable model, supplied by `pi-durable`:
 - **Cancellation** — `@pig cancel` aborts live repository tasks. Aborting a task cascades to its owned agent conversation and then runs the job's abort handler.
 - **Progress comments** — one comment per job, edited in place. Automatic reviews stay silent unless they post a review.
 - **Graceful shutdown** — closing the harness signals running phases. A phase that has not reached a terminal state remains durable and resumes when the process reopens the storage.
+- **Serverless wakeups** — the Cloudflare host maps `harness.wake()` and stored task deadlines to the Durable Object alarm, so hibernate/wake replaces a resident timer.
 
 ## Operations
 
@@ -226,7 +270,8 @@ PiG is an automation tool, not a sandbox boundary.
 - Review jobs have no shell: they can read files and write only `.pig/review.json`.
 - Model provider credentials stay in the PiG process for `pi-ai`; they are not placed in the agent's shell environment.
 - The GitHub App private key, webhook secret, admin token, and installation token are not placed in the agent's shell environment. Git uses a short-lived askpass file around host operations, with hooks and credential helpers disabled and the local Git config reset after the agent exits.
-- Run PiG in a container or dedicated host, as a non-root user, with only the data volume mounted. Restrict egress if your threat model requires it.
+- Run the Node host in a container or dedicated host, as a non-root user, with only the data volume mounted. Restrict egress if your threat model requires it.
+- The Cloudflare host stores the App key and webhook secret as Worker secrets and verifies webhooks with WebCrypto. Its Durable Objects have no shell or coding tools.
 - Keep App permissions minimal and install PiG only on trusted repositories.
 - PiG never pushes to the default branch, never force-pushes an existing PR branch, and reverts workflow-file edits unless explicitly allowed.
 
@@ -234,19 +279,22 @@ PiG is an automation tool, not a sandbox boundary.
 
 ```bash
 npm ci
-npm run check      # typecheck + tests
-npm run build      # compile to dist/
-npm run dev        # run TypeScript directly with Node type stripping
+npm run check         # typecheck + Cloudflare typecheck + tests
+npm run build         # compile the Node host to dist/
+npm run dev           # run the Node host with Node type stripping
+npm run cf:typecheck  # typecheck the Worker/Durable Object host
+npm run cf:dry-run    # bundle the Worker without deploying
 ```
 
 Layout:
 
 ```
 src/
-  durable/      pi-durable app: Harness, job task, admission, docs, model resolution, tools
+  durable/      pi-durable app: Harness, job task, orchestration task, admission, docs, models, tools
+  cloudflare/   Worker + per-repository Durable Object host, alarms, WebCrypto webhook verification
   jobs/         GitHub job handlers (work, review, release, control) and contracts
   github/       App auth, repository metadata, .pig.yml loading
-  webhooks/     signature verification, command parsing, webhook planning
+  webhooks/     signature verification, command parsing, webhook planning, repository extraction
   diff.ts       unified diff indexing and inline-line validation
   semver.ts     version handling and release-note grouping
   server.ts     HTTP/webhook/admin server
