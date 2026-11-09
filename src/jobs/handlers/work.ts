@@ -1,24 +1,11 @@
-import { rmSync } from "node:fs";
-import { join } from "node:path";
 import {
 	extractJsonObject,
+	parseWorkContent,
 	parseWorkRecord,
-	parseWorkResult,
 } from "../../agent/contract.ts";
-import {
-	branchSlug,
-	commitAll,
-	headCommit,
-	listChangedPaths,
-	resetSoftTo,
-	pushBranch,
-	resetLocalGitConfig,
-	revertWorkflowChanges,
-	sanitizeCommitMessage,
-	withGitAskpass,
-} from "../../git.ts";
+import { branchSlug, sanitizeCommitMessage } from "../../git-text.ts";
 import { assertAgentSucceeded } from "../agents.ts";
-import type { JobContext, JobOutcome } from "../context.ts";
+import type { CodingJobContext, JobOutcome } from "../context.ts";
 import { PermanentJobError, TransientJobError } from "../errors.ts";
 import type { WorkJobRequest } from "../types.ts";
 
@@ -91,7 +78,7 @@ interface WorkSourceContext {
 }
 
 function buildWorkPrompt(options: {
-	context: JobContext;
+	context: CodingJobContext;
 	request: WorkJobRequest;
 	source: WorkSourceContext;
 }): string {
@@ -160,7 +147,7 @@ If no changes are needed, leave the worktree unchanged and still write the resul
 }
 
 async function fetchIssueContext(
-	context: JobContext,
+	context: CodingJobContext,
 	number: number,
 ): Promise<WorkSourceContext> {
 	const { owner, name: repo, defaultBranch } = context.repoInfo;
@@ -208,7 +195,7 @@ async function fetchIssueContext(
 }
 
 async function fetchPullRequestContext(
-	context: JobContext,
+	context: CodingJobContext,
 	number: number,
 ): Promise<WorkSourceContext> {
 	const { owner, name: repo } = context.repoInfo;
@@ -288,7 +275,7 @@ interface PublishResult {
 }
 
 async function publishIssuePullRequest(options: {
-	context: JobContext;
+	context: CodingJobContext;
 	number: number;
 	branch: string;
 	title: string;
@@ -360,7 +347,7 @@ function noChangesOutcome(
 }
 
 async function finalizePushedWork(
-	context: JobContext,
+	context: CodingJobContext,
 	request: WorkJobRequest,
 	checkpoint: WorkCheckpoint,
 ): Promise<JobOutcome> {
@@ -435,7 +422,7 @@ async function finalizePushedWork(
 	};
 }
 
-export async function runWorkJob(context: JobContext): Promise<JobOutcome> {
+export async function runWorkJob(context: CodingJobContext): Promise<JobOutcome> {
 	const request = context.request as WorkJobRequest;
 	const checkpoint = checkpointFrom(context.checkpoint);
 
@@ -461,7 +448,7 @@ export async function runWorkJob(context: JobContext): Promise<JobOutcome> {
 			: `${context.config.work.branchPrefix}${request.source.number}-${branchSlug(source.title)}-${context.job.id.slice(0, 8)}`;
 	source.branch = branch;
 
-	const { repoDir, baseSha } = await context.prepareCheckout({
+	const { repoDir, baseSha } = await context.workspace.prepareCheckout({
 		ref: source.sourceType === "issue" ? context.repoInfo.defaultBranch : source.headRef,
 		localBranch: branch,
 		depth: 30,
@@ -479,7 +466,9 @@ export async function runWorkJob(context: JobContext): Promise<JobOutcome> {
 	});
 	assertAgentSucceeded(agentResult);
 
-	const result = parseWorkResult(repoDir) ?? parseWorkRecord(extractJsonObject(agentResult.finalText));
+	const result =
+		parseWorkContent(await context.workspace.readTextFile(".pig/result.json")) ??
+		parseWorkRecord(extractJsonObject(agentResult.finalText));
 	if (!result && !agentResult.finalText.trim()) {
 		throw new TransientJobError("Pi finished without producing a result.");
 	}
@@ -500,18 +489,18 @@ export async function runWorkJob(context: JobContext): Promise<JobOutcome> {
 		}
 	}
 
-	if ((await headCommit(repoDir, context.signal)) !== baseSha) {
-		await resetSoftTo(repoDir, baseSha, context.signal);
+	if ((await context.workspace.headCommit()) !== baseSha) {
+		await context.workspace.resetSoftTo(baseSha);
 	}
-	rmSync(join(repoDir, ".pig"), { recursive: true, force: true });
-	resetLocalGitConfig(repoDir, context.repoInfo.fullName);
+	await context.workspace.removePath(".pig");
+	await context.workspace.resetConfig();
 
-	let changedPaths = await listChangedPaths(repoDir, context.signal);
+	let changedPaths = await context.workspace.listChangedPaths();
 	let revertedWorkflows: string[] = [];
 	if (!context.config.work.allowWorkflowChanges) {
-		const guard = await revertWorkflowChanges(repoDir, changedPaths, context.signal);
+		const guard = await context.workspace.revertWorkflowChanges(changedPaths);
 		revertedWorkflows = guard.reverted;
-		changedPaths = await listChangedPaths(repoDir, context.signal);
+		changedPaths = await context.workspace.listChangedPaths();
 	}
 
 	const title =
@@ -526,12 +515,10 @@ export async function runWorkJob(context: JobContext): Promise<JobOutcome> {
 	context.signal.throwIfAborted();
 	const commitSha =
 		changedPaths.length > 0
-			? await commitAll({
-					cwd: repoDir,
+			? await context.workspace.commitAll({
 					message: commitMessage,
 					name: "PiG",
 					email: `${context.appId}+${context.appSlug}[bot]@users.noreply.github.com`,
-					signal: context.signal,
 				})
 			: null;
 
@@ -547,15 +534,9 @@ export async function runWorkJob(context: JobContext): Promise<JobOutcome> {
 	}
 
 	context.signal.throwIfAborted();
-	await withGitAskpass(async (askpassPath) => {
-		await pushBranch({
-			cwd: repoDir,
-			branch,
-			force: source.sourceType === "issue",
-			remoteUrl: context.remoteUrl,
-			auth: { token: await context.getGitToken(), askpassPath },
-			signal: context.signal,
-		});
+	await context.workspace.pushBranch({
+		branch,
+		force: source.sourceType === "issue",
 	});
 
 	const pushed: WorkCheckpoint = {

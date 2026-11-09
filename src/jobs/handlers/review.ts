@@ -1,16 +1,14 @@
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import type { Octokit } from "@octokit/rest";
 import {
 	extractJsonObject,
+	parseReviewContent,
 	parseReviewRecord,
-	parseReviewResult,
 	type ReviewFinding,
 	type ReviewResult,
 } from "../../agent/contract.ts";
 import { isValidReviewLocation, isSafeRepositoryPath, parseDiff, summarizeDiff, truncateDiff } from "../../diff.ts";
 import { assertAgentSucceeded } from "../agents.ts";
-import { skippedOutcome, type JobContext, type JobOutcome } from "../context.ts";
+import { skippedOutcome, type CodingJobContext, type JobOutcome } from "../context.ts";
 import { PermanentJobError, TransientJobError } from "../errors.ts";
 import type { ReviewJobRequest } from "../types.ts";
 
@@ -180,7 +178,7 @@ function buildReviewBody(
 }
 
 function buildReviewPrompt(options: {
-	context: JobContext;
+	context: CodingJobContext;
 	request: ReviewJobRequest;
 	prNumber: number;
 	title: string;
@@ -265,7 +263,7 @@ function commentsForReview(findings: ReviewFinding[]): { path: string; line: num
 }
 
 async function findExistingReview(
-	context: JobContext,
+	context: CodingJobContext,
 	pullNumber: number,
 	headSha: string,
 ): Promise<{ url: string; state: string } | null> {
@@ -302,7 +300,7 @@ function checkpointFrom(checkpoint: unknown): { reviewUrl: string; headSha: stri
 	return null;
 }
 
-export async function runReviewJob(context: JobContext): Promise<JobOutcome> {
+export async function runReviewJob(context: CodingJobContext): Promise<JobOutcome> {
 	const request = context.request as ReviewJobRequest;
 	const { owner, name: repo } = context.repoInfo;
 
@@ -383,7 +381,7 @@ export async function runReviewJob(context: JobContext): Promise<JobOutcome> {
 	if (!diffText) {
 		throw new TransientJobError("GitHub returned an empty diff for this pull request.");
 	}
-	if (Buffer.byteLength(diffText, "utf8") > MAX_DIFF_PARSE_BYTES) {
+	if (new TextEncoder().encode(diffText).byteLength > MAX_DIFF_PARSE_BYTES) {
 		if (request.auto) {
 			return skippedOutcome("The pull request diff is too large for an automatic review.");
 		}
@@ -394,20 +392,18 @@ export async function runReviewJob(context: JobContext): Promise<JobOutcome> {
 	const diffIndex = parseDiff(diffText);
 	const diffForPrompt = truncateDiff(diffText, MAX_DIFF_PROMPT_BYTES);
 
-	const { repoDir } = await context.prepareCheckout({
+	const { repoDir } = await context.workspace.prepareCheckout({
 		ref: `pull/${pullRequest.number}/head`,
 		detached: true,
 		depth: 10,
 	});
 
-	const contextDir = join(repoDir, ".pig", "context");
-	mkdirSync(contextDir, { recursive: true });
 	const diffNote = diffForPrompt.truncated
 		? "\n\n... diff truncated for prompt size. Read the changed files for the remainder.\n"
 		: "\n";
-	writeFileSync(join(contextDir, "pr.diff"), diffForPrompt.text + diffNote, "utf8");
-	writeFileSync(
-		join(contextDir, "pr.json"),
+	await context.workspace.writeFile(".pig/context/pr.diff", diffForPrompt.text + diffNote);
+	await context.workspace.writeFile(
+		".pig/context/pr.json",
 		JSON.stringify(
 			{
 				number: pullRequest.number,
@@ -422,7 +418,6 @@ export async function runReviewJob(context: JobContext): Promise<JobOutcome> {
 			null,
 			2,
 		),
-		"utf8",
 	);
 
 	const prompt = buildReviewPrompt({
@@ -451,7 +446,7 @@ export async function runReviewJob(context: JobContext): Promise<JobOutcome> {
 	assertAgentSucceeded(agentResult);
 
 	const parsed =
-		parseReviewResult(repoDir) ??
+		parseReviewContent(await context.workspace.readTextFile(".pig/review.json")) ??
 		parseReviewRecord(extractJsonObject(agentResult.finalText));
 	if (!parsed) {
 		throw new TransientJobError("Pi did not produce a valid review result.");

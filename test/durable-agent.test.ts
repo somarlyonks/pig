@@ -143,6 +143,7 @@ test("runs a durable conversation and returns the assistant answer", async () =>
 						thinking: null,
 						maxTurns: 5,
 						instructions: "Answer the user.",
+						toolExtensions: { work: WorkTools, review: ReviewTools },
 						logger,
 					},
 					{

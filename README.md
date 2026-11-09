@@ -148,14 +148,35 @@ The SQLite database and workspace directory live under `/data`. Workspaces are c
 
 PiG also ships a Cloudflare Worker + Durable Object host. It follows the model from [Pi Durable on Cloudflare](https://earendil.com/posts/pi-durable-on-cloudflare/): the Worker receives webhooks, and one Durable Object per repository owns the `pi-durable` SQLite state, the job tasks, and the alarm that wakes the object for retries and in-flight work. No always-on server is required.
 
-What runs there:
+It has two modes:
 
-- **Control and release** jobs work fully.
-- **Manual work/review** commands become a control notice explaining that coding jobs need the Node host or a coding execution backend.
-- **Automatic reviews** are ignored silently.
-- No model calls are made by this host; it does not need model credentials.
+- **Orchestration only** — without a coding runner, control and release jobs work. Manual work/review commands become a control notice, automatic reviews are ignored, and no model calls are made.
+- **Full** — with a coding runner configured, work and review also run. The Durable Object owns state, orchestration, model calls, and GitHub output; a separate trusted Node **runner** executes the checkout, files, shell, and Git. This is the state/execution split from Pi Durable.
 
-Setup:
+### Full mode setup
+
+Start a runner somewhere with Git, a persistent workspace volume, and outbound access to GitHub and your Worker:
+
+```bash
+PIG_RUNNER_TOKEN="a-long-random-token" \
+PIG_RUNNER_WORKSPACE_ROOT="./data/runner" \
+npm run runner
+```
+
+Or from the built image:
+
+```bash
+docker run -d --name pig-runner \
+  -p 8790:8790 \
+  -e PIG_RUNNER_TOKEN="a-long-random-token" \
+  -e PIG_RUNNER_WORKSPACE_ROOT=/data/runner \
+  -v pig-runner:/data/runner \
+  pig-github-app node dist/runner/main.js
+```
+
+Put the runner behind HTTPS and keep its token secret. It executes arbitrary work jobs inside per-job checkouts, so treat it as a trusted execution host and isolate it from unrelated secrets and data.
+
+Configure the Worker:
 
 ```bash
 npm run cf:dry-run                 # bundle without deploying
@@ -163,12 +184,18 @@ npx wrangler secret put PIG_GITHUB_APP_ID
 npx wrangler secret put PIG_GITHUB_PRIVATE_KEY   # paste the PEM, newlines escaped or raw
 npx wrangler secret put PIG_WEBHOOK_SECRET
 npx wrangler secret put PIG_ADMIN_TOKEN          # optional
+npx wrangler secret put PIG_RUNNER_TOKEN         # same value as the runner
+npx wrangler secret put PIG_RUNNER_URL           # https://runner.example
+npx wrangler secret put ANTHROPIC_API_KEY        # or another provider key
+# Optional: set PIG_MODEL / PIG_THINKING as Worker variables or secrets.
 npm run cf:deploy
 ```
 
 Point the GitHub App webhook at `https://<worker-host>/api/github/webhooks`. `PIG_APP_SLUG` and `PIG_TABLE_PREFIX` live in `wrangler.jsonc`; keep the prefix stable.
 
-For local Worker development, put the same values in `.dev.vars` (ignored by Git), then run `npm run cf:dev`. Set `PIG_APP_SLUG` there if your app slug differs from `pig`.
+For local Worker development, put the same values in `.dev.vars` (ignored by Git), then run `npm run cf:dev`. For a local full-mode test, run the runner on `127.0.0.1:8790` and set `PIG_RUNNER_URL=http://127.0.0.1:8790` in `.dev.vars`.
+
+The Durable Object copies common provider keys from Worker secrets into the isolate before creating models. Add more provider secrets to the copy list in `src/cloudflare/repo-do.ts` if your provider is not covered.
 
 Admin routes require `PIG_ADMIN_TOKEN` and a repository, because state is partitioned per repository:
 
@@ -179,12 +206,14 @@ GET /api/jobs/<id>?repo=owner/name
 
 Limitations:
 
-- Work and review need a real checkout, shell, and Git; a Durable Object cannot run them. A remote execution backend is the next step.
+- Full mode needs the separate runner. Without it, work and review are notices, not jobs.
+- The runner is an execution host, even if it is on-demand or idle most of the time. It is not a second source of durable state; the Durable Object owns state.
 - Admin listing is per repository, not global.
 - Cloudflare is still a hosted service; the host is serverless and hibernates, not “no cloud at all.”
 - One repository is one Durable Object and one storage owner. Do not point two processes at the same DO storage.
+- Enabling or disabling the runner changes the active task kind. Jobs from the other mode remain in storage but are not shown by the active admin view.
 
-The Node host below remains the full-featured deployment.
+The Node host below remains the simplest full-featured single-process deployment.
 
 ## Commands
 
@@ -271,7 +300,7 @@ PiG is an automation tool, not a sandbox boundary.
 - Model provider credentials stay in the PiG process for `pi-ai`; they are not placed in the agent's shell environment.
 - The GitHub App private key, webhook secret, admin token, and installation token are not placed in the agent's shell environment. Git uses a short-lived askpass file around host operations, with hooks and credential helpers disabled and the local Git config reset after the agent exits.
 - Run the Node host in a container or dedicated host, as a non-root user, with only the data volume mounted. Restrict egress if your threat model requires it.
-- The Cloudflare host stores the App key and webhook secret as Worker secrets and verifies webhooks with WebCrypto. Its Durable Objects have no shell or coding tools.
+- The Cloudflare host stores the App key and webhook secret as Worker secrets and verifies webhooks with WebCrypto. In orchestration mode the Durable Object has no shell or coding tools; in full mode the agent tools run only on the authenticated runner, while the Durable Object keeps state and model access.
 - Keep App permissions minimal and install PiG only on trusted repositories.
 - PiG never pushes to the default branch, never force-pushes an existing PR branch, and reverts workflow-file edits unless explicitly allowed.
 
@@ -284,14 +313,16 @@ npm run build         # compile the Node host to dist/
 npm run dev           # run the Node host with Node type stripping
 npm run cf:typecheck  # typecheck the Worker/Durable Object host
 npm run cf:dry-run    # bundle the Worker without deploying
+npm run runner        # run the trusted remote coding runner
 ```
 
 Layout:
 
 ```
 src/
-  durable/      pi-durable app: Harness, job task, orchestration task, admission, docs, models, tools
+  durable/      pi-durable app: Harness, job/orchestration tasks, admission, docs, models, tools, remote workspace/tools
   cloudflare/   Worker + per-repository Durable Object host, alarms, WebCrypto webhook verification
+  runner/       trusted remote coding runner for Cloudflare full mode
   jobs/         GitHub job handlers (work, review, release, control) and contracts
   github/       App auth, repository metadata, .pig.yml loading
   webhooks/     signature verification, command parsing, webhook planning, repository extraction

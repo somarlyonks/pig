@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { ReviewSide } from "../diff.ts";
 
 export interface WorkResult {
@@ -32,15 +30,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 		: null;
 }
 
-function readText(path: string, maxBytes = 128 * 1024): string | null {
-	try {
-		const text = readFileSync(path, "utf8");
-		return Buffer.byteLength(text, "utf8") > maxBytes ? text.slice(0, maxBytes) : text;
-	} catch {
-		return null;
-	}
-}
-
 export function extractJsonObject(text: string): Record<string, unknown> | null {
 	let candidate = text.trim();
 	const fenced = /^```(?:json)?\s*([\s\S]*?)```$/i.exec(candidate);
@@ -57,11 +46,6 @@ export function extractJsonObject(text: string): Record<string, unknown> | null 
 	} catch {
 		return null;
 	}
-}
-
-function readArtifact(repoDir: string, relativePath: string): Record<string, unknown> | null {
-	const text = readText(join(repoDir, relativePath));
-	return text === null ? null : extractJsonObject(text);
 }
 
 function optionalString(record: Record<string, unknown>, key: string, maxLength: number): string | null {
@@ -85,8 +69,8 @@ export function parseWorkRecord(record: Record<string, unknown> | null): WorkRes
 	return result;
 }
 
-export function parseWorkResult(repoDir: string): WorkResult | null {
-	return parseWorkRecord(readArtifact(repoDir, ".pig/result.json"));
+export function parseWorkContent(content: string | null): WorkResult | null {
+	return content === null ? null : parseWorkRecord(extractJsonObject(content));
 }
 
 function isReviewSide(value: unknown): value is ReviewSide {
@@ -132,6 +116,6 @@ export function parseReviewRecord(record: Record<string, unknown> | null): Revie
 	return { summary, verdict, findings };
 }
 
-export function parseReviewResult(repoDir: string): ReviewResult | null {
-	return parseReviewRecord(readArtifact(repoDir, ".pig/review.json"));
+export function parseReviewContent(content: string | null): ReviewResult | null {
+	return content === null ? null : parseReviewRecord(extractJsonObject(content));
 }

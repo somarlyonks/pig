@@ -16,6 +16,9 @@
 	"vars": {
 		"PIG_APP_SLUG": "pig",
 		"PIG_TABLE_PREFIX": "pig_"
+		// Optional model selection for the full Cloudflare host:
+		// "PIG_MODEL": "anthropic/claude-sonnet-4-5",
+		// "PIG_THINKING": "high"
 	},
 	"observability": {
 		"enabled": true

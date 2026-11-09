@@ -1,5 +1,6 @@
 import type { Octokit } from "@octokit/rest";
 import type { ModelRef } from "@earendil-works/pi-durable";
+import type { JobWorkspace } from "../durable/workspace.ts";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { RepositoryInfo } from "../github/repo.ts";
 import type { Logger } from "../logger.ts";
@@ -40,18 +41,6 @@ export interface AgentSettings {
 	model: ModelRef | null;
 	thinking: ModelThinkingLevel | null;
 	timeoutMs: number;
-}
-
-export interface CheckoutRequest {
-	ref: string;
-	localBranch?: string | null;
-	detached?: boolean;
-	depth?: number;
-}
-
-export interface Checkout {
-	repoDir: string;
-	baseSha: string;
 }
 
 export type JobSummaryStatus =
@@ -101,13 +90,9 @@ export interface OrchestrationContext {
 	now(): number;
 }
 
-export interface JobContext extends OrchestrationContext {
+export interface CodingJobContext extends OrchestrationContext {
+	workspace: JobWorkspace;
 	settings: AgentSettings;
-	prepareCheckout(request: CheckoutRequest): Promise<Checkout>;
-	workspaceRoot: string;
-	workspaceDir: string;
-	remoteUrl: string;
-	getGitToken(): Promise<string>;
 	agent: (options: AgentRunOptions) => Promise<AgentRunResult>;
 }
 

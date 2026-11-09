@@ -1,5 +1,3 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import type { Octokit } from "@octokit/rest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Context, JsonValue } from "@earendil-works/chord";
@@ -8,6 +6,7 @@ import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
 	defineTask,
 	type ConversationId,
+	type Extension,
 	type Harness,
 	type RunningTask,
 	type Task,
@@ -18,18 +17,13 @@ import type { AppConfig } from "../config.ts";
 import { fetchRepository, splitRepository, type RepositoryInfo } from "../github/repo.ts";
 import type { RepoConfigLoader } from "../github/repo-config.ts";
 import type { GitHubClients } from "../github/app.ts";
-import {
-	headCommit,
-	prepareRepository,
-	repositoryUrl,
-	withGitAskpass,
-} from "../git.ts";
 import type {
 	AgentSettings,
-	JobContext,
+	CodingJobContext,
 	JobInfo,
 	JobOutcome,
 	JobSummary,
+	OrchestrationContext,
 } from "../jobs/context.ts";
 import {
 	PermanentJobError,
@@ -41,12 +35,12 @@ import { runControlJob } from "../jobs/handlers/control.ts";
 import { runReleaseJob } from "../jobs/handlers/release.ts";
 import { runReviewJob } from "../jobs/handlers/review.ts";
 import { runWorkJob } from "../jobs/handlers/work.ts";
-import type { JobRequest } from "../jobs/types.ts";
 import type { Logger } from "../logger.ts";
 import type { RepoConfig } from "../repo-config.ts";
 import { ModelResolutionError, resolveModel } from "./models.ts";
 import { runDurableAgent } from "./agent.ts";
 import { JobDoc, appendEvent, type JobDocValue } from "./docs.ts";
+import type { JobWorkspace, WorkspaceFactory } from "./workspace.ts";
 import {
 	ackText,
 	backoffForAttempt,
@@ -82,25 +76,8 @@ export interface JobTaskDeps {
 	harness: Harness;
 	listJobs(repo: string, limit: number): Promise<JobSummary[]>;
 	cancelRepoJobs(repo: string, exceptTaskId: TaskId): Promise<{ cancelled: number; running: number }>;
-	remoteUrlForRepo?: (repo: string) => string;
-}
-
-interface CheckoutMarker {
-	attempt: number;
-	ref: string;
-	localBranch: string | null;
-	baseSha: string;
-}
-
-function cleanupWorkspace(deps: JobTaskDeps, taskId: TaskId): void {
-	try {
-		rmSync(join(deps.config.workspaceRoot, jobKey(taskId)), {
-			recursive: true,
-			force: true,
-		});
-	} catch (error) {
-		deps.logger.warn("Could not remove the job workspace", { taskId, error });
-	}
+	workspaceFactory: WorkspaceFactory;
+	toolExtensions: { work: Extension; review: Extension };
 }
 
 async function getInstallationToken(
@@ -159,89 +136,6 @@ async function resolveSettings(
 		}
 		throw error;
 	}
-}
-
-function readCheckoutMarker(workspaceDir: string): CheckoutMarker | null {
-	try {
-		const parsed = JSON.parse(readFileSync(join(workspaceDir, "checkout.json"), "utf8")) as CheckoutMarker;
-		if (
-			typeof parsed.attempt === "number" &&
-			typeof parsed.ref === "string" &&
-			typeof parsed.baseSha === "string" &&
-			(parsed.localBranch === null || typeof parsed.localBranch === "string")
-		) {
-			return parsed;
-		}
-	} catch {
-		// Missing or invalid marker: prepare a fresh checkout.
-	}
-	return null;
-}
-
-interface CheckoutOptions {
-	workspaceDir: string;
-	fullName: string;
-	ref: string;
-	localBranch: string | null;
-	detached: boolean;
-	depth: number;
-	attempt: number;
-	installationId: number;
-	signal: AbortSignal;
-	remoteUrl: string;
-}
-
-async function prepareCheckout(
-	deps: JobTaskDeps,
-	tokens: Map<number, { token: string; expiresAt: number }>,
-	options: CheckoutOptions,
-): Promise<{ repoDir: string; baseSha: string }> {
-	const repoDir = join(options.workspaceDir, "repo");
-	const marker = readCheckoutMarker(options.workspaceDir);
-	const reusable =
-		marker !== null &&
-		marker.attempt === options.attempt &&
-		marker.ref === options.ref &&
-		marker.localBranch === options.localBranch &&
-		existsSync(join(repoDir, ".git"));
-	if (reusable) {
-		return { repoDir, baseSha: marker.baseSha };
-	}
-
-	rmSync(repoDir, { recursive: true, force: true });
-	mkdirSync(options.workspaceDir, { recursive: true });
-	await withGitAskpass(async (askpassPath) => {
-		await prepareRepository({
-			dir: repoDir,
-			fullName: options.fullName,
-			ref: options.ref,
-			...(options.localBranch !== null ? { localBranch: options.localBranch } : {}),
-			detached: options.detached,
-			depth: options.depth,
-			auth: {
-				token: await getInstallationToken(deps, tokens, options.installationId),
-				askpassPath,
-			},
-			signal: options.signal,
-			remoteUrl: options.remoteUrl,
-		});
-	});
-	const baseSha = await headCommit(repoDir, options.signal);
-	writeFileSync(
-		join(options.workspaceDir, "checkout.json"),
-		JSON.stringify(
-			{
-				attempt: options.attempt,
-				ref: options.ref,
-				localBranch: options.localBranch,
-				baseSha,
-			} satisfies CheckoutMarker,
-			null,
-			2,
-		),
-		"utf8",
-	);
-	return { repoDir, baseSha };
 }
 
 function jobInstructions(kind: "work" | "review"): string {
@@ -319,20 +213,17 @@ async function prepareJob(
 	return { octokit, repoInfo, repoConfig, settings, jobDoc };
 }
 
-function buildJobContext(
+function buildBaseContext(
 	deps: JobTaskDeps,
 	task: RunningTask<JobTaskInput, JobTaskCheckpoint, JobTaskResult>,
 	runtime: TaskRuntime<JobTaskInput, JobTaskCheckpoint, JobTaskResult, object>,
 	context: Context,
-	tokens: Map<number, { token: string; expiresAt: number }>,
 	prepared: PreparedJob,
 	progress: ProgressComment,
-): JobContext {
+): OrchestrationContext {
 	const input = task.input;
 	const state = task.state.checkpoint;
 	const jobId = jobKey(task.id);
-	const workspaceDir = join(deps.config.workspaceRoot, jobId);
-	mkdirSync(workspaceDir, { recursive: true });
 	const info: JobInfo = {
 		id: jobId,
 		installationId: input.installationId,
@@ -342,7 +233,7 @@ function buildJobContext(
 		maxAttempts: input.maxAttempts,
 		createdAt: input.createdAt,
 	};
-	const jobContext: JobContext = {
+	const base: OrchestrationContext = {
 		job: info,
 		request: input.request,
 		repoInfo: prepared.repoInfo,
@@ -352,11 +243,7 @@ function buildJobContext(
 		appId: deps.config.appId,
 		logger: deps.logger,
 		signal: runtime.signal,
-		workspaceRoot: deps.config.workspaceRoot,
-		workspaceDir,
-		remoteUrl: deps.remoteUrlForRepo?.(input.repo) ?? repositoryUrl(input.repo),
 		checkpoint: prepared.jobDoc.checkpoint,
-		settings: prepared.settings,
 		async setCheckpoint(value) {
 			await runtime.commit(async (tx) => {
 				const doc = await tx.doc(JobDoc, jobId, null);
@@ -364,9 +251,8 @@ function buildJobContext(
 				doc.updatedAt = runtime.now();
 				return undefined;
 			}, context);
-			jobContext.checkpoint = value;
+			base.checkpoint = value;
 		},
-		getGitToken: () => getInstallationToken(deps, tokens, input.installationId),
 		updateProgress: (text) => progress.update(text),
 		cancelRepositoryJobs: () => deps.cancelRepoJobs(input.repo, task.id),
 		listJobs: (limit) => deps.listJobs(input.repo, limit),
@@ -383,6 +269,24 @@ function buildJobContext(
 			}, context);
 		},
 		now: () => runtime.now(),
+	};
+	return base;
+}
+
+function buildCodingContext(
+	base: OrchestrationContext,
+	deps: JobTaskDeps,
+	task: RunningTask<JobTaskInput, JobTaskCheckpoint, JobTaskResult>,
+	context: Context,
+	prepared: PreparedJob,
+	workspace: JobWorkspace,
+): CodingJobContext {
+	const state = task.state.checkpoint;
+	const jobId = jobKey(task.id);
+	return {
+		...base,
+		workspace,
+		settings: prepared.settings,
 		agent: async (options) => {
 			if (!prepared.settings.model) {
 				return {
@@ -392,7 +296,7 @@ function buildJobContext(
 					retryable: false,
 				};
 			}
-			const result = await runDurableAgent(
+			return runDurableAgent(
 				{
 					harness: deps.harness,
 					jobId,
@@ -402,41 +306,40 @@ function buildJobContext(
 					thinking: prepared.settings.thinking,
 					maxTurns: options.tools === "review" ? 40 : 120,
 					instructions: jobInstructions(options.tools),
+					toolExtensions: deps.toolExtensions,
+					initConversation: (tx, conversationId) =>
+						workspace.initConversation(tx, conversationId),
 					logger: deps.logger,
 				},
 				options,
 				context,
 			);
-			return result;
 		},
-		prepareCheckout: (options) =>
-			prepareCheckout(deps, tokens, {
-				workspaceDir,
-				fullName: input.repo,
-				ref: options.ref,
-				localBranch: options.localBranch ?? null,
-				detached: options.detached ?? false,
-				depth: options.depth ?? 30,
-				attempt: state.attempt,
-				installationId: input.installationId,
-				signal: runtime.signal,
-				remoteUrl: deps.remoteUrlForRepo?.(input.repo) ?? repositoryUrl(input.repo),
-			}),
 	};
-	return jobContext;
 }
 
-function runHandler(request: JobRequest, context: JobContext): Promise<JobOutcome> {
-	switch (request.kind) {
-		case "control":
-			return runControlJob(context);
-		case "review":
-			return runReviewJob(context);
-		case "work":
-			return runWorkJob(context);
-		case "release":
-			return runReleaseJob(context);
+async function runHandler(
+	deps: JobTaskDeps,
+	task: RunningTask<JobTaskInput, JobTaskCheckpoint, JobTaskResult>,
+	runtime: TaskRuntime<JobTaskInput, JobTaskCheckpoint, JobTaskResult, object>,
+	context: Context,
+	prepared: PreparedJob,
+	progress: ProgressComment,
+	workspace: JobWorkspace | null,
+): Promise<JobOutcome> {
+	const base = buildBaseContext(deps, task, runtime, context, prepared, progress);
+	const request = task.input.request;
+	if (request.kind === "control") {
+		return runControlJob(base);
 	}
+	if (request.kind === "release") {
+		return runReleaseJob(base);
+	}
+	if (!workspace) {
+		throw new Error("Coding workspace is not available.");
+	}
+	const coding = buildCodingContext(base, deps, task, context, prepared, workspace);
+	return request.kind === "work" ? runWorkJob(coding) : runReviewJob(coding);
 }
 
 async function handleFailure(
@@ -446,6 +349,7 @@ async function handleFailure(
 	context: Context,
 	error: unknown,
 	progress: ProgressComment | null,
+	workspace: JobWorkspace | null,
 ): Promise<void> {
 	const state = task.state.checkpoint;
 	const input = task.input;
@@ -504,7 +408,19 @@ async function handleFailure(
 			outcome: { status: "failed", error: { message } },
 		};
 	}, context);
-	cleanupWorkspace(deps, task.id);
+	await cleanupJobWorkspace(workspace, deps.logger);
+}
+
+async function cleanupJobWorkspace(
+	workspace: JobWorkspace | null,
+	logger: Logger,
+): Promise<void> {
+	if (!workspace) return;
+	try {
+		await workspace.cleanup();
+	} catch (error) {
+		logger.warn("Could not clean up the job workspace", { error });
+	}
 }
 
 async function runPhase(
@@ -542,10 +458,30 @@ async function runPhase(
 	const jobDoc = await readJobDoc(deps.harness, task.id, context);
 	const progress = createProgress(deps, task, runtime, context, jobDoc);
 	let prepared: PreparedJob | null = null;
+	let workspace: JobWorkspace | null = null;
 	try {
 		prepared = await prepareJob(deps, task, progress, jobDoc);
-		const contextForJob = buildJobContext(deps, task, runtime, context, tokens, prepared, progress);
-		const outcome = await runHandler(task.input.request, contextForJob);
+		const request = task.input.request;
+		if (request.kind === "work" || request.kind === "review") {
+			workspace = await deps.workspaceFactory({
+				config: deps.config,
+				input: task.input,
+				taskId: task.id,
+				attempt: state.attempt,
+				signal: runtime.signal,
+				getGitToken: () =>
+					getInstallationToken(deps, tokens, task.input.installationId),
+			});
+		}
+		const outcome = await runHandler(
+			deps,
+			task,
+			runtime,
+			context,
+			prepared,
+			progress,
+			workspace,
+		);
 		if (runtime.signal.aborted) {
 			return;
 		}
@@ -572,13 +508,13 @@ async function runPhase(
 			repo: task.input.repo,
 			summary: outcome.summary,
 		});
-		cleanupWorkspace(deps, task.id);
+		await cleanupJobWorkspace(workspace, deps.logger);
 	} catch (error) {
 		if (runtime.signal.aborted) {
 			return;
 		}
 		try {
-			await handleFailure(deps, task, runtime, context, error, progress);
+			await handleFailure(deps, task, runtime, context, error, progress, workspace);
 		} catch (failureError) {
 			deps.logger.error("Could not record the job failure", { error: failureError });
 		}
@@ -587,6 +523,7 @@ async function runPhase(
 
 async function abortPhase(
 	deps: JobTaskDeps,
+	tokens: Map<number, { token: string; expiresAt: number }>,
 	task: RunningTask<JobTaskInput, JobTaskCheckpoint, JobTaskResult>,
 	runtime: TaskRuntime<JobTaskInput, JobTaskCheckpoint, JobTaskResult, object>,
 	context: Context,
@@ -604,6 +541,22 @@ async function abortPhase(
 			deps.logger.debug("Could not abort the agent conversation during cancellation", {
 				error,
 			});
+		}
+	}
+	if (input.request.kind === "work" || input.request.kind === "review") {
+		try {
+			const workspace = await deps.workspaceFactory({
+				config: deps.config,
+				input,
+				taskId: task.id,
+				attempt: task.state.checkpoint.attempt,
+				signal: runtime.signal,
+				getGitToken: () =>
+					getInstallationToken(deps, tokens, input.installationId),
+			});
+			await workspace.cleanup();
+		} catch (error) {
+			deps.logger.warn("Could not clean up the cancelled job workspace", { error });
 		}
 	}
 	try {
@@ -624,7 +577,6 @@ async function abortPhase(
 			outcome: { status: "aborted", reason: "cancelled" },
 		};
 	}, context);
-	cleanupWorkspace(deps, task.id);
 	deps.logger.info("Job cancelled", { jobId: jobKey(task.id), repo: input.repo });
 }
 
@@ -641,6 +593,6 @@ export function createJobTask(deps: JobTaskDeps): JobTaskDefinition {
 		phases: {
 			run: (task, runtime, context) => runPhase(deps, tokens, task, runtime, context),
 		},
-		abort: (task, runtime, context) => abortPhase(deps, task, runtime, context),
+		abort: (task, runtime, context) => abortPhase(deps, tokens, task, runtime, context),
 	});
 }

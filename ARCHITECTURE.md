@@ -200,17 +200,25 @@ PiG has one durable job model and two hosts.
 - Work, review, release, and control jobs run with Node execution tools, local Git operations, and model calls.
 - Retry sleeps use the harness's timers. A graceful shutdown leaves unfinished tasks durable for the next process.
 
-**Cloudflare orchestration host (experimental):**
+**Cloudflare host (experimental):**
 
 - A Worker verifies webhooks with WebCrypto and routes each repository to its own Durable Object.
-- The Durable Object owns `pi-durable` SQLite storage and the `pig.orchestration` task. It hibernates while idle and uses its alarm to wake for stored task deadlines and in-flight work.
-- Control and release jobs run fully. `@pig status`, `@pig help`, `@pig cancel`, and releases are supported.
-- Manual work/review commands become a control notice that names the missing coding backend. Automatic reviews are ignored without a comment.
-- No model calls and no coding tools run in this host; it needs no model credentials.
-- State is partitioned per repository, so admin listing and job lookup require a repository name.
-- One repository is one Durable Object and one storage owner.
+- The Durable Object owns `pi-durable` SQLite storage and the `pig.job` task. It hibernates while idle and uses its alarm to wake for stored task deadlines and in-flight work.
+- Without a coding runner, it runs as an **orchestration host**: control and release jobs work, manual work/review commands become a notice, automatic reviews are ignored, and no model calls are made.
+- With `PIG_RUNNER_URL` and `PIG_RUNNER_TOKEN`, it runs in **full mode**: work and review jobs run with the same handlers as the Node host. The Durable Object owns state, orchestration, model calls, reviews, releases, progress comments, and GitHub output. Agent file/shell/Git tools execute on the runner through a remote workspace.
+- State and admin listing are partitioned per repository. One repository is one Durable Object and one storage owner.
+- Agent state stays in the DO; the runner holds only an ephemeral checkout and performs tool calls. The runner is not a second durable-state owner.
 
-Both hosts share command planning, admission records, job documents, per-repository chaining, retries, cancellation, checkpoints, and progress comments. The orchestration host uses a separate task kind so its bundle never imports the Node Git/filesystem/agent code.
+**Remote coding runner:**
+
+- A separate trusted Node service, started with `npm run runner`.
+- Authenticates callers with `PIG_RUNNER_TOKEN`.
+- Creates one checkout per job attempt under a persistent workspace root and reuses it for the same attempt.
+- Implements file read/write/edit/list, shell execution, changed paths, workflow reverts, commit, push, reset, and cleanup.
+- Receives short-lived GitHub installation tokens for clone/push; it never receives model provider keys or the App private key.
+- Treat it as an execution host with the same trust level as the Node host's agent tools. Isolate it from unrelated secrets and data.
+
+Both hosts share command planning, admission records, job documents, per-repository chaining, retries, cancellation, checkpoints, and progress comments. The orchestration-only mode uses a separate `pig.orchestration` task so it does not execute coding or model work; Worker-compatible code may still be bundled for full mode.
 
 ## 8. Safety and isolation
 
@@ -218,7 +226,8 @@ Both hosts share command planning, admission records, job documents, per-reposit
 - Authorization happens server-side per job. `.pig.yml` may grant named users, but only writers can change that file on the default branch.
 - PiG never pushes to the default branch and never force-pushes an existing pull request branch. It force-pushes only its own deterministic `pig/*` branch for issue work.
 - Host Git operations use a short-lived askpass file created around the operation and removed afterwards. Hooks and credential helpers are disabled; the local Git config is reset after agent work; pushes use an explicit repository URL.
-- Agent shell commands receive a minimal environment: system basics, `CI`, and Git no-prompt guards. `PIG_*`, `GITHUB_*`, `GH_*`, model provider keys, and unrelated host secrets are not inherited.
+- Agent shell commands receive a minimal environment: system basics, `CI`, and Git no-prompt guards. `PIG_*`, `GITHUB_*`, `GH_*`, model provider keys, and unrelated host secrets are not inherited. The remote runner applies the same environment to its shell tool.
+- The Cloudflare runner is authenticated by `PIG_RUNNER_TOKEN`, must be behind HTTPS, and executes agent work in its own per-job checkouts. It receives short-lived GitHub installation tokens only; model and App credentials stay out of runner tool environments.
 - Review agents have no shell and may write only `.pig/review.json`.
 - The in-process agent can still read files the PiG process can read. Run PiG in a container or dedicated host, as a non-root user, with only the data volume mounted.
 - The agent's process group is cleaned up when a bash tool call exits.
@@ -227,7 +236,8 @@ Both hosts share command planning, admission records, job documents, per-reposit
 
 - Single GitHub host (github.com); GitHub Enterprise Server is not configured.
 - One process or Durable Object owns one `pi-durable` SQLite storage. There is no cross-process locking or horizontal scaling. High availability comes from restart/hibernation and durable resume, not from replicas.
-- The Cloudflare host is orchestration-only in v1: work and review require the Node host or a future remote coding execution backend.
+- The Cloudflare full mode still needs a runner execution host; state is serverless, execution is not part of the Durable Object.
+- The Cloudflare host runs work/review only in full mode, which requires the separate coding runner. Without it, coding commands are notices.
 - The app depends on an **experimental** `pi-durable` API. Upgrades may require data migrations; PiG pins an exact version.
 - No web dashboard. GitHub comments, reviews, releases, the status command, and the admin endpoint are the interface.
 - The Cloudflare host has no global admin listing across repository Durable Objects.

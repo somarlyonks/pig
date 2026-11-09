@@ -4,9 +4,13 @@ import type { Wake } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { createGitHubClients } from "../github/app.ts";
 import {
+	createCloudflareCodingRuntime,
+} from "../durable/cloudflare-coding-runtime.ts";
+import {
 	createOrchestrationRuntime,
-	type OrchestrationRuntime,
+	type DurableRuntime,
 } from "../durable/orchestration-runtime.ts";
+import { RemoteRunnerClient } from "../durable/remote-runner.ts";
 import { cloudflareConfig } from "./config.ts";
 import type { CloudflareEnv } from "./env.ts";
 import { createConsoleLogger } from "./logger.ts";
@@ -14,7 +18,7 @@ import { createConsoleLogger } from "./logger.ts";
 const RECOVERY_ALARM_MS = 60_000;
 
 export class RepoDurableObject extends DurableObject<CloudflareEnv> {
-	#runtime: OrchestrationRuntime | null = null;
+	#runtime: DurableRuntime | null = null;
 	#alarmQueue: Promise<void> = Promise.resolve();
 
 	constructor(ctx: DurableObjectState, env: CloudflareEnv) {
@@ -26,22 +30,54 @@ export class RepoDurableObject extends DurableObject<CloudflareEnv> {
 		const logger = createConsoleLogger("info");
 		const config = cloudflareConfig(this.env);
 		const clients = createGitHubClients(config, logger);
+		for (const key of [
+			"ANTHROPIC_API_KEY",
+			"OPENAI_API_KEY",
+			"DEEPSEEK_API_KEY",
+			"GEMINI_API_KEY",
+			"OPENROUTER_API_KEY",
+		]) {
+			const value = (this.env as unknown as Record<string, unknown>)[key];
+			if (typeof value === "string" && value !== "") {
+				process.env[key] = value;
+			}
+		}
+		const runnerUrl = this.env.PIG_RUNNER_URL?.trim();
+		const runnerToken = this.env.PIG_RUNNER_TOKEN?.trim();
+		if ((runnerUrl && !runnerToken) || (!runnerUrl && runnerToken)) {
+			throw new Error("Set both PIG_RUNNER_URL and PIG_RUNNER_TOKEN, or neither");
+		}
+		const runner =
+			runnerUrl && runnerToken
+				? new RemoteRunnerClient({ baseUrl: runnerUrl, token: runnerToken })
+				: null;
 		const storage = await openDurableObjectSqliteStorage(
 			this.ctx.storage,
 			config.tablePrefix === "" ? {} : { prefix: config.tablePrefix },
 		);
-		const runtime = await createOrchestrationRuntime({
-			storage,
-			config,
-			clients,
-			logger,
-			recoveryMs: RECOVERY_ALARM_MS,
-			onWake: (wake) => {
-				void this.#arm(wake).catch((error) => {
-					console.error("Could not arm the PiG alarm", error);
+		const onWake = (wake: Wake) => {
+			void this.#arm(wake).catch((error) => {
+				console.error("Could not arm the PiG alarm", error);
+			});
+		};
+		const runtime = runner
+			? await createCloudflareCodingRuntime({
+					storage,
+					config,
+					clients,
+					logger,
+					runner,
+					recoveryMs: RECOVERY_ALARM_MS,
+					onWake,
+				})
+			: await createOrchestrationRuntime({
+					storage,
+					config,
+					clients,
+					logger,
+					recoveryMs: RECOVERY_ALARM_MS,
+					onWake,
 				});
-			},
-		});
 		this.#runtime = runtime;
 		void runtime.closed.then((end) => {
 			if (end.kind === "failed") {
@@ -52,7 +88,7 @@ export class RepoDurableObject extends DurableObject<CloudflareEnv> {
 		runtime.resume();
 	}
 
-	#requireRuntime(): OrchestrationRuntime {
+	#requireRuntime(): DurableRuntime {
 		if (!this.#runtime) {
 			throw new Error("PiG runtime is not initialized");
 		}

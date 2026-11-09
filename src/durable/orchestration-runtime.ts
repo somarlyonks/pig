@@ -34,6 +34,8 @@ export interface OrchestrationRuntimeOptions {
 	recoveryMs?: number;
 }
 
+export type DurableRuntime = OrchestrationRuntime;
+
 export interface OrchestrationRuntime {
 	config: AppConfig;
 	harness: Harness;

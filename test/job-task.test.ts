@@ -31,6 +31,7 @@ import {
 } from "../src/durable/job-task.ts";
 import { WorkTools, ReviewTools } from "../src/durable/tools.ts";
 import type { JobRequest } from "../src/jobs/types.ts";
+import { createLocalWorkspace } from "../src/durable/local-workspace.ts";
 import type { Logger } from "../src/logger.ts";
 
 function silentLogger(): Logger {
@@ -373,7 +374,14 @@ async function setup(options: HarnessOptions = {}): Promise<TestHarness> {
 		harness,
 		listJobs: async () => [],
 		cancelRepoJobs: async () => ({ cancelled: 0, running: 0 }),
-		...(options.remoteUrl ? { remoteUrlForRepo: () => options.remoteUrl! } : {}),
+		workspaceFactory: (workspaceOptions) =>
+			createLocalWorkspace({
+				...workspaceOptions,
+				...(options.remoteUrl
+					? { remoteUrlForRepo: () => options.remoteUrl! }
+					: {}),
+			}),
+		toolExtensions: { work: WorkTools, review: ReviewTools },
 	});
 	registry.install({ name: "pig.jobs", tasks: [jobTask] });
 	harness.resume();

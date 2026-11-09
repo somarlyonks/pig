@@ -1,13 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import {
 	extractJsonObject,
+	parseReviewContent,
 	parseReviewRecord,
-	parseReviewResult,
-	parseWorkResult,
+	parseWorkContent,
 } from "../src/agent/contract.ts";
 
 function temporaryRepo(): string {
@@ -32,7 +32,7 @@ test("reads a valid work result", () => {
 				summary: "Added parser tests.",
 			}),
 		);
-		const result = parseWorkResult(repo);
+		const result = parseWorkContent(readFileSync(join(repo, ".pig", "result.json"), "utf8"));
 		assert.equal(result?.title, "Add tests");
 		assert.equal(result?.body, "## Changes\n\nAdds tests.");
 		assert.equal(result?.commitMessage, "test: add parser coverage");
@@ -78,13 +78,13 @@ test("returns null for an empty or missing review artifact", () => {
 	const repo = temporaryRepo();
 	try {
 		writeArtifact(repo, "review.json", "{}");
-		assert.equal(parseReviewResult(repo), null);
+		assert.equal(parseReviewContent(readFileSync(join(repo, ".pig", "review.json"), "utf8")), null);
 		writeArtifact(
 			repo,
 			"review.json",
 			JSON.stringify({ summary: "Clean.", verdict: "approve", findings: [] }),
 		);
-		const result = parseReviewResult(repo);
+		const result = parseReviewContent(readFileSync(join(repo, ".pig", "review.json"), "utf8"));
 		assert.equal(result?.summary, "Clean.");
 		assert.equal(result?.verdict, "approve");
 	} finally {

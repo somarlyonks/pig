@@ -18,6 +18,7 @@ import {
 	listJobsForRepo,
 } from "./inspect.ts";
 import { createJobTask } from "./job-task.ts";
+import { createLocalWorkspace } from "./local-workspace.ts";
 import { createModelRuntime } from "./models.ts";
 import type { PigApp } from "./runtime-types.ts";
 import { JOB_TASK_NAME } from "./task-types.ts";
@@ -73,6 +74,8 @@ export async function openPigApp(config: AppConfig, logger: Logger): Promise<Pig
 		listJobs: (repo, limit) => listJobsForRepo(harness, JOB_TASK_NAME, repo, limit),
 		cancelRepoJobs: (repo, except) =>
 			cancelJobsForRepo(harness, JOB_TASK_NAME, repo, except),
+		workspaceFactory: (options) => createLocalWorkspace(options),
+		toolExtensions: { work: WorkTools, review: ReviewTools },
 	});
 	registry.install({ name: "pig.jobs", tasks: [jobTask] });
 	harness.resume();

@@ -3,18 +3,19 @@ import type { Context, JsonValue } from "@earendil-works/chord";
 import {
 	AssistantEntry,
 	type Conversation,
-	type Harness,
 	type ConversationId,
+	type Extension,
+	type Harness,
 	type ModelRef,
 	type Submission,
 	type SettledSubmissionRecord,
 	type TaskId,
+	type Tx,
 } from "@earendil-works/pi-durable";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentRunOptions, AgentRunResult } from "../jobs/context.ts";
 import type { Logger } from "../logger.ts";
 import { JobDoc } from "./docs.ts";
-import { ReviewTools, WorkTools } from "./tools.ts";
 
 export interface DurableAgentConfig {
 	harness: Harness;
@@ -25,6 +26,8 @@ export interface DurableAgentConfig {
 	thinking: ModelThinkingLevel | null;
 	maxTurns: number;
 	instructions: string;
+	toolExtensions: { work: Extension; review: Extension };
+	initConversation?: (tx: Tx, conversationId: ConversationId) => Promise<void>;
 	logger: Logger;
 }
 
@@ -96,11 +99,12 @@ async function conversationFor(
 				model: config.model,
 				...(config.thinking ? { thinkingLevel: config.thinking } : {}),
 				cwd: options.cwd,
-				extensions: [options.tools === "work" ? WorkTools : ReviewTools],
+				extensions: [config.toolExtensions[options.tools]],
 				instructions: config.instructions,
 				maxTurns: config.maxTurns,
 			},
 			init: async (tx, conversationId) => {
+				await config.initConversation?.(tx, conversationId);
 				const doc = await tx.doc(JobDoc, config.jobId, null);
 				doc.conversationId = conversationId;
 				doc.conversationAttempt = config.attempt;
