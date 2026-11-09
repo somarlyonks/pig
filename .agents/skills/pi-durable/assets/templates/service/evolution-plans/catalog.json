@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "strategies": {
+    "trace-distillation": {
+      "when": "One recurring, evidence-linked failure suggests one small prompt, tool, or task-script repair.",
+      "maxCandidates": 1,
+      "maxGenerations": 1,
+      "operator": "focused-reflection"
+    },
+    "population": {
+      "when": "Several complete alternatives can be compared with one frozen scalar outcome score.",
+      "maxCandidates": 4,
+      "maxGenerations": 2,
+      "operator": "bounded-alternative"
+    },
+    "pareto": {
+      "when": "Candidates have complementary case-level strengths; retain nondominated options before selecting one finalist.",
+      "maxCandidates": 4,
+      "maxGenerations": 2,
+      "operator": "case-specific-repair"
+    }
+  },
+  "sharedPolicy": "Development-only mutation, reflection, ranking and operator attribution; one frozen finalist, one-way independent validation, optional later holdout; no automatic source activation.",
+  "operatorAdaptation": "Use development-only parent/child deltas to write a next-study hypothesis. Require at least two distinct attributable child-parent comparisons per operator plus parent/task-family coverage before treating an operator as established. This local helper is not a trained optimizer."
+}

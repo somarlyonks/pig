@@ -1,0 +1,9 @@
+{
+  "agentId": "pr-reviewer",
+  "goal": "Demonstrate the local improvement lifecycle by adding structured finding guidance while retaining required prompt boundaries. This mechanics-only example cannot establish model decision quality.",
+  "allowedPaths": ["prompts/pr-reviewer.md"],
+  "verifierPath": "evaluation/local-verifier.mjs",
+  "fixturePaths": ["evaluation/mechanics-cases.json"],
+  "minimumImprovement": 0.01,
+  "timeoutMs": 120000
+}

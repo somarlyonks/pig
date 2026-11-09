@@ -1,0 +1,19 @@
+{
+  "id": "review-coordinator",
+  "name": "Durable review and refine coordinator",
+  "instructions": "Use an explicit author, reviewer and refiner chain for evidence-sensitive answers.",
+  "instructionsFile": "prompts/review-refine.md",
+  "repositories": ["example/demo"],
+  "modelChoice": {"task":"coding"},
+  "subagents": {
+    "maxChildrenPerCall": 4,
+    "maxChildrenPerRun": 6,
+    "maxTaskChars": 6000,
+    "maxResultChars": 12000,
+    "roles": [
+      {"id":"author","instructions":"Draft the assigned analysis.","instructionsFile":"prompts/author.md","modelChoice":{"task":"coding"}},
+      {"id":"reviewer","instructions":"Critique the prior analysis.","instructionsFile":"prompts/reviewer.md","modelChoice":{"task":"review"}},
+      {"id":"refiner","instructions":"Resolve supported criticism.","instructionsFile":"prompts/refiner.md","modelChoice":{"task":"review"}}
+    ]
+  }
+}

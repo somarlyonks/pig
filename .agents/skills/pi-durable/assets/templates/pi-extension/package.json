@@ -1,0 +1,13 @@
+{
+  "name": "pi-durable-agent-console",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=24"},
+  "pi": {"extensions": ["./extension.ts"]},
+  "scripts": {"check": "tsc --noEmit", "test": "tsx --test tests/*.test.ts"},
+  "dependencies": {"typebox": "1.3.7"},
+  "peerDependencies": {"@earendil-works/pi-coding-agent": "1.5.1", "@earendil-works/pi-tui": "1.5.1"},
+  "peerDependenciesMeta": {"@earendil-works/pi-coding-agent": {"optional": true}, "@earendil-works/pi-tui": {"optional": true}},
+  "devDependencies": {"@earendil-works/pi-coding-agent": "1.5.1", "@earendil-works/pi-tui": "1.5.1", "@types/node": "24.10.0", "typescript": "5.9.3", "tsx": "4.20.6"}
+}

@@ -1,0 +1,9 @@
+{
+  "version":1,"scope":"synthetic-task-policy-mechanics",
+  "cases":[
+    {"id":"dev-new-pr","required":true,"input":{"kind":"pull_request","action":"opened","number":11},"expected":"review"},
+    {"id":"dev-duplicate","required":true,"input":{"kind":"pull_request","action":"opened","number":12,"seen":true},"expected":"ignore"},
+    {"id":"dev-draft","required":true,"input":{"kind":"pull_request","action":"opened","number":13,"draft":true},"expected":"ignore"},
+    {"id":"dev-returned-pr","required":false,"input":{"kind":"pull_request","action":"reopened","number":14},"expected":"review"}
+  ]
+}

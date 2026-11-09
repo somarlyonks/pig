@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "enabled": false,
+  "goal": "Define the agent's observable duty and concrete acceptance assertions before enabling verification.",
+  "assertions": []
+}

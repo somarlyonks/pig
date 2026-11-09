@@ -1,0 +1,9 @@
+{
+  "version":1,"scope":"synthetic-task-policy-mechanics",
+  "cases":[
+    {"id":"val-opened","required":true,"input":{"kind":"pull_request","action":"opened","number":31},"expected":"review"},
+    {"id":"val-already-seen","required":true,"input":{"kind":"pull_request","action":"reopened","number":32,"seen":true},"expected":"ignore"},
+    {"id":"val-draft-return","required":true,"input":{"kind":"pull_request","action":"reopened","number":33,"draft":true},"expected":"ignore"},
+    {"id":"val-ready-pr","required":false,"input":{"kind":"pull_request","action":"ready_for_review","number":34},"expected":"review"}
+  ]
+}

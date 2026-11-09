@@ -1,0 +1,18 @@
+{
+  "id": "supervisor",
+  "name": "Durable supervisor",
+  "instructions": "Delegate bounded specialist work and return an evidence-linked answer.",
+  "instructionsFile": "prompts/supervisor.md",
+  "repositories": ["example/demo"],
+  "modelChoice": {"task":"coding"},
+  "subagents": {
+    "maxChildrenPerCall": 4,
+    "maxChildrenPerRun": 8,
+    "maxTaskChars": 6000,
+    "maxResultChars": 12000,
+    "roles": [
+      {"id":"researcher","instructions":"Research the assigned question.","instructionsFile":"prompts/researcher.md","modelChoice":{"task":"research"}},
+      {"id":"reviewer","instructions":"Check the assigned evidence.","instructionsFile":"prompts/reviewer.md","modelChoice":{"task":"review"}}
+    ]
+  }
+}

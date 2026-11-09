@@ -40,9 +40,36 @@ Automatic behavior:
 
 PiG never edits a pull request body to add reviews, and never approves by default.
 
+### 2.1 Command origin and reply channel
+
+Every command records an **origin**: `github` or `console`.
+
+- `github` is a mention in an issue or pull request comment. Replies and progress go to that issue or pull request.
+- `console` is an operator console submitting a command through the authenticated dispatch API (§9). The console is a client only: PiG behaves the same whether or not a console exists, and no job depends on one.
+
+A console command carries a **dispatch key**, stable across console retries, and a **claimed actor**, the GitHub login it acts for.
+
+The reply channel follows the origin, not the job kind:
+
+- Console commands whose artifacts live on GitHub (`work`, `review`, `release`) report progress on GitHub exactly like GitHub-originated commands.
+- Console commands whose entire result is informational (`status`, `help`, `cancel`) are answered in the console. PiG posts no GitHub comment for them.
+
+PiG verifies the claimed actor's repository permission with the GitHub API before running, and applies `.pig.yml` `permissions.allow` on top. The console holds **no GitHub credential**: the console's token authorizes "may submit commands to this PiG", and every GitHub read, write, and permission decision is PiG's own, made with its installation token.
+
 ## 3. Durable job contract
 
 PiG uses one `pi-durable` Harness over one SQLite storage per host session. On the Node host, one process owns the database. On Cloudflare, one Durable Object owns one repository database. `pi-durable` has no cross-process locking. The Harness is resumed on startup or Durable Object start, which recovers tasks that were cut off by a crash, shutdown, hibernation, or host failure.
+
+### Anchoring
+
+Every `work` and `review` job is anchored to a real GitHub issue or pull request, whatever its origin. The anchor is what the job operates on and where it reports. PiG may create it, but never invents one that does not exist on GitHub.
+
+- `work` and `review` require an issue or an open pull request.
+- `release` and `control` are repository-scoped and take no anchor.
+- A console command may ask PiG to create the anchor (`anchor: auto`). PiG then creates one issue before preparing the workspace, and the job records the anchor number as a checkpoint before doing any work. This is the only way PiG creates an issue on its own.
+- Anchor creation is idempotent through a hidden marker carrying the job's idempotency key: an attempt, retry, or resumed job reuses an existing anchor instead of opening a second one, and a missing marker search never falls back to creating a duplicate.
+- A PiG-created anchor is a report location, not a command. It names the requesting login and its origin, and it never mentions the app, so its `issues.opened` event plans no command. PiG still records that delivery and ignores it.
+- The anchor unifies where a job reports, not what several commands mean. Two commands on one anchor are two jobs with two write targets, in admission order.
 
 ### Admission
 
@@ -86,6 +113,8 @@ Ignored events (no mention, bot author, unsupported action) also record their de
 
 Handlers persist checkpoints for irreversible steps:
 
+- A work job records its anchor, write target, base ref, and base commit before pushing.
+- A PiG-created anchor issue number is recorded before the workspace is prepared.
 - A work PR update records the pushed commit before PR bookkeeping.
 - A review records the posted review URL after the review succeeds, and also detects a review already posted by PiG for the same head commit before posting again.
 - A release records the planned tag, target commit, version, notes, and draft/prerelease flags before creating external state.
@@ -94,7 +123,7 @@ Retries resume from the checkpoint rather than rebuilding completed work.
 
 ### Progress reporting
 
-- Work, manual review, release, and control jobs post one progress comment, then edit it instead of adding comments.
+- Work, manual review, and release jobs post one progress comment, then edit it instead of adding comments. A console command whose result is informational posts no GitHub comment and is answered in the console.
 - Automatic reviews are silent until the review is posted.
 - Failures update the progress comment with the actionable error; automatic reviews fail silently to avoid noise on every push.
 - Job status, request, events, and progress-comment ID are available to the operator over an authenticated admin endpoint.
@@ -102,6 +131,24 @@ Retries resume from the checkpoint rather than rebuilding completed work.
 ## 4. Work requests
 
 A work request targets an issue or a pull request.
+
+**Write target**:
+
+A work request names its write target explicitly. The target is part of the command; it is never inferred from the instructions and never chosen by the agent. The agent produces only the change set. PiG decides the branch, the base, whether a push is forced, and which pull request is created or updated.
+
+| Anchor | Target | Branch | Forced on retry | Pull request |
+| --- | --- | --- | --- | --- |
+| Issue | `new` | `<prefix><issue>-<slug>-<job>` from the default branch | Yes | New pull request closing the issue |
+| Pull request | `head` | The pull request's head branch | No | The same pull request |
+| Pull request | `patch` | `<prefix><pr>-patch-<job>` from the recorded head commit | Yes | New draft pull request based on the pull request's head branch |
+
+- `head` is the default for a GitHub-originated command on a pull request, matching `@pig fix` semantics.
+- A console command that asks PiG to create its anchor always uses the `new` target: a branch from the default branch and a pull request that closes the new issue.
+- `patch` puts PiG's changes on a PiG-owned branch above the pull request head. It never rewrites the contributing branch, never pushes to it, and never rebases.
+- `patch` is the only target that works for a fork pull request, because the new branch belongs to the base repository.
+- An already published patch branch stays as it is if the parent head moves. A new command is needed to rebase or extend it; the job reports the patch branch as stale instead of silently rewriting it.
+- Force is allowed only for the branches PiG names deterministically (`new` and `patch`). A pull request's head branch is never force-pushed.
+- The job checkpoint records the target, the base ref, and the base commit, so an attempt resumes against the same base and the outcome is auditable afterwards.
 
 **On an issue**:
 
@@ -111,10 +158,11 @@ A work request targets an issue or a pull request.
 - If the agent changes nothing, no branch or PR is created and the progress comment says so.
 - Closed issues are rejected.
 
-**On a pull request**:
+**On a pull request, with the `head` target**:
 
-- PiG only updates same-repository head branches. Fork branches are rejected with an explanation, because the installation token cannot push to the fork.
+- PiG only updates same-repository head branches. Fork branches are rejected with an explanation, because the installation token cannot push to the fork, and the message points at the `patch` target instead.
 - PiG commits to the existing head branch without force-pushing. A rejected non-fast-forward push fails and may be retried.
+- If the head commit changed while PiG was working, the attempt fails as retryable and restarts from the new head instead of pushing a stale base.
 - Closed or merged pull requests are rejected.
 - If the agent changes nothing, no commit is pushed.
 - Review-thread commands include the file, line, and inline comment as context.
@@ -224,7 +272,9 @@ Both hosts share command planning, admission records, job documents, per-reposit
 
 - Webhooks require a valid `X-Hub-Signature-256` HMAC. Unsigned or stale deliveries are rejected before parsing. The Node host uses `node:crypto`; the Cloudflare Worker uses WebCrypto.
 - Authorization happens server-side per job. `.pig.yml` may grant named users, but only writers can change that file on the default branch.
-- PiG never pushes to the default branch and never force-pushes an existing pull request branch. It force-pushes only its own deterministic `pig/*` branch for issue work.
+- A command that does not originate from GitHub carries only a claimed actor. PiG verifies that login's repository permission with the GitHub API before running and never trusts a console's claim about who may start work.
+- Bot-authored work stays attributable: the anchor issue and the pull request name the login the job was requested for.
+- PiG never pushes to the default branch and never force-pushes an existing pull request branch. It force-pushes only the work branches it names deterministically (`new` and `patch`).
 - Host Git operations use a short-lived askpass file created around the operation and removed afterwards. Hooks and credential helpers are disabled; the local Git config is reset after agent work; pushes use an explicit repository URL.
 - Agent shell commands receive a minimal environment: system basics, `CI`, and Git no-prompt guards. `PIG_*`, `GITHUB_*`, `GH_*`, model provider keys, and unrelated host secrets are not inherited. The remote runner applies the same environment to its shell tool.
 - The Cloudflare runner is authenticated by `PIG_RUNNER_TOKEN`, must be behind HTTPS, and executes agent work in its own per-job checkouts. It receives short-lived GitHub installation tokens only; model and App credentials stay out of runner tool environments.
@@ -232,14 +282,61 @@ Both hosts share command planning, admission records, job documents, per-reposit
 - The in-process agent can still read files the PiG process can read. Run PiG in a container or dedicated host, as a non-root user, with only the data volume mounted.
 - The agent's process group is cleaned up when a bash tool call exits.
 
-## 9. Limits and non-goals (v1)
+## 9. Operator console
+
+An operator console is an optional client that submits commands to workers and observes their jobs. PiG is one kind of worker; a Pi instance on a personal machine is another. A console is never a dependency: everything in this document works with no console running. This section specifies the worker side of the contract.
+
+### 9.1 Workers and transport
+
+- A worker declares its repositories, capabilities, and transport when it registers. Registration is an operator action, not self-service discovery.
+- Transport is declared, never negotiated. `inbound` means the console calls the worker over HTTPS. `outbound` means the worker keeps an outbound session to the console. A worker uses exactly one path, and an unreachable worker is offline rather than retried on the other path.
+- An outbound session is an HTTPS long poll held open by the console for 25–35 seconds. WebSocket is not required. A sleeping or disconnected worker reconnects with its next poll.
+- A worker announces session start and stop, so the console can tell "not delivered" from "delivered and waiting".
+- The addressable unit is a worker plus its repository, never a worker alone. On the Cloudflare host this is structural: one repository is one Durable Object, and the worker routes internally.
+- A worker that loses or invalidates its credential pauses delivery until it is registered again. Delivery is not retried into a dead session.
+
+### 9.2 Dispatch semantics
+
+- Dispatch is at least once. The console defines the dispatch key and keeps it stable across its own retries; the worker deduplicates by that key at admission, exactly like a repeated comment, so a duplicate dispatch reuses the original job.
+- Pending records on the console are delivery attempts, not a queue of record. Losing them loses no work, and re-dispatching the same key is always safe. There is still no second scheduler, lease, or ack-based reordering: the worker's own job chain serializes work.
+- An unknown outcome is resolved by looking up the dispatch key, never by resending blindly. A worker can always answer which job a key created.
+- The consumed cursor lives on the worker. The console does not track what a worker has already consumed, so a console that loses its state cannot replay a command into a second job.
+- A command carries a delivery deadline. The worker rejects an expired command at admission, because the console cannot recall a record from a worker that is offline.
+- A dispatch is in exactly one of three states: submitted (the console recorded it, the worker has not accepted it), accepted (the worker admitted it and returned a job ID), observed (the console read the job). Only the worker's job record is authoritative, and observed states carry when they were observed.
+
+### 9.3 Console boundaries
+
+- The console holds no GitHub credential and none of a worker's model credentials. It submits commands, reads job records, and answers in its own interface.
+- Workers keep their own storage. The console never writes a task, conversation, or job record, and never reads conversation transcripts.
+- Reply channel rules for console commands are in §2.1.
+
+### 9.4 Deployment and registration
+
+- The console is a separate application with its own durable storage. Its state is cross-repository (registrations, pending deliveries, observations) while a worker's storage is per repository, so the two never share a database.
+- The console must be reachable by workers over HTTPS without a worker exposing an inbound port.
+- Registration is an operator action backed by a one-time enrollment token. Reaching the console never registers a worker, because registration is what grants the console the right to run commands on that worker's machine.
+- A registration declares the worker's identity, version, transport, credential, repository scope, and capabilities. A capability declares a name, a parameter schema, a scope, and whether it is dangerous.
+- The console renders and checks capability parameters from the declared schema and never interprets their meaning. The worker is always the validator of its own parameters.
+- A dangerous capability always requires a person's confirmation, whatever the origin of the request.
+- Adding a kind of worker never requires console changes. The console knows workers only through their declaration.
+
+### 9.5 Observation
+
+- The console stores what it read and when it read it. Observations are a cache with an observation time, never authority.
+- Observations are keyed by worker, repository, and job, and reconciled by the job's state revision rather than by last write.
+- A worker's repository set is what it declared plus what the console observed, because the Cloudflare host cannot enumerate its own repositories. The console shows "never observed" differently from "observed and idle".
+- A console that loses its observations loses no work and no authoritative state; it rebuilds by reading workers again.
+- Console v1 is a status board plus a command box. A natural-language layer may sit above them later, but neither depends on one, and every dispatched command is a structured proposal with its target, write target, and parameters shown and confirmed before it is sent.
+
+## 10. Limits and non-goals (v1)
 
 - Single GitHub host (github.com); GitHub Enterprise Server is not configured.
 - One process or Durable Object owns one `pi-durable` SQLite storage. There is no cross-process locking or horizontal scaling. High availability comes from restart/hibernation and durable resume, not from replicas.
 - The Cloudflare full mode still needs a runner execution host; state is serverless, execution is not part of the Durable Object.
 - The Cloudflare host runs work/review only in full mode, which requires the separate coding runner. Without it, coding commands are notices.
 - The app depends on an **experimental** `pi-durable` API. Upgrades may require data migrations; PiG pins an exact version.
-- No web dashboard. GitHub comments, reviews, releases, the status command, and the admin endpoint are the interface.
+- PiG ships no UI of its own. GitHub comments, reviews, releases, the status command, an authenticated read API, and an authenticated dispatch API are the interface. An operator console may exist outside PiG, but PiG never depends on one, and losing it loses no work.
+- PiG does not interpret a request to decide where a change lands. A work target is always explicit in the command.
 - The Cloudflare host has no global admin listing across repository Durable Objects.
 - No package publishing, deployment automation, merge queues, or issue triage.
 - No continuation of the same Pi conversation across separate commands. Every job attempt starts a fresh conversation, while a crash within an attempt resumes it.

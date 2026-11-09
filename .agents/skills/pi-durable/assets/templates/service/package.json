@@ -1,0 +1,29 @@
+{
+  "name": "pi-durable-agent-service",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/cli.js",
+    "smoke": "node dist/src/smoke.js",
+    "subagents:smoke": "node dist/src/subagents-smoke.js",
+    "evolve": "node dist/src/evolve-cli.js",
+    "models": "node dist/src/models-cli.js",
+    "test": "tsx --test tests/*.test.ts",
+    "verify": "node dist/src/verify-cli.js"
+  },
+  "dependencies": {
+    "@earendil-works/pi-durable": "1.5.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/chord": "1.5.0",
+    "@earendil-works/pi-schema": "1.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.0",
+    "typescript": "5.9.3",
+    "tsx": "4.20.6"
+  }
+}

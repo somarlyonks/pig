@@ -1,0 +1,10 @@
+{
+  "version":1,"scope":"synthetic-task-policy-mechanics",
+  "cases":[
+    {"id":"hold-closed","required":true,"input":{"kind":"pull_request","action":"closed","number":51},"expected":"ignore"},
+    {"id":"hold-issue","required":true,"input":{"kind":"issue","action":"opened","number":52},"expected":"ignore"},
+    {"id":"hold-draft-ready","required":true,"input":{"kind":"pull_request","action":"ready_for_review","number":53,"draft":true},"expected":"ignore"},
+    {"id":"hold-reopened","required":false,"input":{"kind":"pull_request","action":"reopened","number":54},"expected":"review"},
+    {"id":"hold-ready","required":false,"input":{"kind":"pull_request","action":"ready_for_review","number":55},"expected":"review"}
+  ]
+}

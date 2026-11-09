@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "strategy": "trace-distillation",
+  "agentId": "pr-reviewer",
+  "goal": "Demonstrate an evidence-linked task-policy repair while retaining duplicate and draft guards. Synthetic deterministic outcome mechanics only; this does not establish model review quality.",
+  "allowedPaths": ["scripts/task-policy.mjs"],
+  "development": {
+    "verifierPath": "evolution-plans/task-verifier.mjs",
+    "fixturePaths": ["evolution-plans/fixtures/development.json"]
+  },
+  "validationCommitment": "evolution-plans/validation-commitment.json",
+  "holdoutCommitment": "evolution-plans/holdout-commitment.json",
+  "minimumImprovement": 0.01,
+  "timeoutMs": 120000,
+  "maxCandidates": 1,
+  "maxGenerations": 1,
+  "maxWallSeconds": 3600
+}
