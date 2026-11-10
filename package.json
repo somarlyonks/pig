@@ -20,7 +20,10 @@
 		"cf:dry-run": "wrangler deploy --dry-run --outdir dist-cloudflare",
 		"cf:typecheck": "tsc -p tsconfig.cloudflare.json",
 		"runner": "node --env-file-if-exists=.env src/runner/main.ts",
-		"runner:dist": "node --env-file-if-exists=.env dist/runner/main.js"
+		"runner:dist": "node --env-file-if-exists=.env dist/runner/main.js",
+		"console:dev": "wrangler dev -c wrangler.console.jsonc",
+		"console:deploy": "wrangler deploy -c wrangler.console.jsonc",
+		"console:dry-run": "wrangler deploy -c wrangler.console.jsonc --dry-run --outdir dist-console"
 	},
 	"keywords": [
 		"github-app",

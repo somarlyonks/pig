@@ -315,6 +315,36 @@ curl -sS -X POST "http://127.0.0.1:8080/api/dispatch" \
 - With an `anchor` and `anchorType`, `target` selects where the change lands: `new` (branch from the default branch), `head` (the pull request's own branch), or `patch` (a PiG-owned branch above the pull request head, opened as a draft pull request; the only target that works for a fork).
 - `pig.status` and `pig.cancel` are answered on the job record instead of GitHub. Read the answer from `GET /api/jobs/:id` in the `reply` field.
 
+## Operator console
+
+The console is an optional separate app: one Worker and one Durable Object with its own storage, a status board, and a command box. It is a client of the workers it registers and holds no GitHub credential. Deploy it apart from PiG:
+
+```bash
+npx wrangler secret put PIG_CONSOLE_TOKEN -c wrangler.console.jsonc
+npm run console:deploy          # or: npm run console:dev for a local board
+```
+
+Register a PiG worker once. Create an enrollment token in the board, then hand it to the worker's owner:
+
+```bash
+curl -sS -X POST "https://pig-console.<account>.workers.dev/api/workers" \
+  -H "content-type: application/json" \
+  -d '{
+    "enrollmentToken": "enr_...",
+    "workerId": "pig-prod",
+    "kind": "pig",
+    "baseUrl": "https://pig.example",
+    "repos": ["owner/name"],
+    "secret": "<that PiG instance PIG_ADMIN_TOKEN>"
+  }'
+```
+
+The console asks the worker for `GET /api/capabilities`, so capabilities come from the worker, not from the registration form. Registration is single-use and expiring, because registering a worker grants the console the right to run its commands.
+
+- The console stores each worker's API token because it must call that worker. Give every worker its own token and keep the console isolated.
+- A dangerous capability (`pig.release`, `pig.cancel`) always needs a confirmation from the board before it is sent.
+- The board shows observed jobs only. "Never observed" and "observed and idle" are different states; the console cannot enumerate a Cloudflare host's repositories.
+
 ## Security
 
 PiG is an automation tool, not a sandbox boundary.

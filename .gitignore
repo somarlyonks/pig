@@ -8,5 +8,6 @@ data/
 .DS_Store
 *.pem
 dist-cloudflare/
+dist-console/
 .wrangler/
 .dev.vars

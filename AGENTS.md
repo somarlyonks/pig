@@ -23,6 +23,9 @@ Tests use `node --test` with Node's TypeScript type stripping. Import source fil
 - `src/webhooks/` — raw-body signature verification (Node and WebCrypto), command parsing, webhook planning, repository extraction.
 - `src/durable/` — pi-durable app: Harness, `pig.job` and `pig.orchestration` tasks, admission, docs, model resolution, tools, agent adapter, remote workspace/tools, and host runtimes.
 - `src/cloudflare/` — Worker + per-repository Durable Object host, alarms, WebCrypto verification.
+- `src/dispatch/` — console dispatch planning, capability declarations, worker-side admission glue.
+- `src/console/` — operator console runtime: worker registry, enrollment, command proposals, observation log, board UI.
+- `src/cloudflare/console/` — the console Worker and its Durable Object (separate deployment, `wrangler.console.jsonc`).
 - `src/runner/` — trusted remote coding runner for Cloudflare full mode.
 - `src/jobs/` — GitHub job handlers (work/review/release/control), contracts, errors.
 - `src/github/` — App clients, repository metadata, `.pig.yml` loading.
