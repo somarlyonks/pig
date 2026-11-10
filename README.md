@@ -336,6 +336,13 @@ npm run smoke -- owner/name 7 --work     # posts @pig fix and opens a pull reque
 
 `smoke` starts the server in-process and posts a **signed** `issue_comment` delivery to `/api/github/webhooks` — the same shape GitHub sends — then waits for the job. That exercises signature verification, planning, admission, authorization, the job task, and GitHub output without waiting for a real webhook delivery. Use the number of an existing issue or pull request; `--actor=<login>` defaults to the installation account.
 
+Inside the container image only the compiled output exists, so use the built entry points:
+
+```bash
+docker compose run --rm pig node dist/doctor-cli.js owner/name
+docker compose run --rm pig node dist/smoke-cli.js owner/name 7
+```
+
 ## Operator console
 
 The console is an optional separate app: one Worker and one Durable Object with its own storage, a status board, and a command box. It is a client of the workers it registers and holds no GitHub credential. Deploy it apart from PiG:
