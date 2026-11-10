@@ -725,3 +725,39 @@ test("an outbound worker reports its own observations", async () => {
 		await app.runtime.shutdown();
 	}
 });
+
+test("an outbound worker announces when its session starts and stops", async () => {
+	const calls: Call[] = [];
+	const app = await setup({ calls });
+	try {
+		const sessionToken = await registerOutbound(app.runtime);
+		assert.equal((await app.runtime.listWorkers())[0]?.sessionState, "unknown");
+
+		await app.runtime.setSessionState({
+			workerId: "pig-mac",
+			token: sessionToken,
+			state: "active",
+		});
+		const active = (await app.runtime.listWorkers())[0];
+		assert.equal(active?.sessionState, "active");
+		assert.equal(active?.sessionSeenAt, 1_000_000);
+
+		await app.runtime.setSessionState({
+			workerId: "pig-mac",
+			token: sessionToken,
+			state: "stopped",
+		});
+		assert.equal((await app.runtime.listWorkers())[0]?.sessionState, "stopped");
+
+		await assert.rejects(
+			app.runtime.setSessionState({
+				workerId: "pig-mac",
+				token: "ses_wrong",
+				state: "active",
+			}),
+			/invalid session token/,
+		);
+	} finally {
+		await app.runtime.shutdown();
+	}
+});

@@ -65,6 +65,7 @@ Keep skills in sync when architecture, deployment, or debugging knowledge change
 - Console dispatch is at least once: the worker deduplicates by dispatch key at admission. Never add a second queue, lease, or ack layer, and never resolve an unknown outcome by resending blindly. An unknown outcome is a dispatch-key lookup.
 - A worker's transport is declared (inbound or outbound), never negotiated. Console pending records are delivery attempts, not authoritative state; the consumed cursor lives on the worker.
 - An operator console is a separate application with its own storage and never shares a database with a worker. Registration requires an explicit one-time enrollment token; reachability never registers a worker. The console knows workers only through their capability declaration.
+- The console's natural-language layer only produces proposals: it has no dispatch path, it drops proposals the worker would reject, and a person still confirms before anything is sent.
 - The Cloudflare orchestration path must not execute coding tasks or model calls. It may share Worker-compatible modules with full mode, but must not use the local Node workspace, `git.ts`, or `NodeExecutionEnv`.
 - The Cloudflare full mode uses the same `pig.job` task, remote workspace, and remote tools as the coding path. Its coding tools go through the authenticated runner, never through a local `ExecutionEnv`.
 - Map `harness.wake()` and stored task deadlines to the Durable Object alarm. Alarms are at-least-once; keep admission and task phases idempotent.

@@ -131,7 +131,17 @@ function renderWorkers() {
     kind.textContent = worker.kind;
     head.appendChild(name);
     head.appendChild(document.createTextNode(" "));
+    const session = document.createElement("span");
+    session.className = "pill";
+    session.textContent = worker.sessionState === "unknown" ? "never polled" : worker.sessionState;
+    head.appendChild(session);
+    head.appendChild(document.createTextNode(" "));
     head.appendChild(kind);
+    head.appendChild(document.createTextNode(" "));
+    const session = document.createElement("span");
+    session.className = "pill";
+    session.textContent = worker.sessionState === "unknown" ? "never polled" : worker.sessionState;
+    head.appendChild(session);
     head.appendChild(document.createTextNode(" "));
     const obs = document.createElement("span");
     obs.className = "muted";

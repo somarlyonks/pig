@@ -54,6 +54,11 @@ export interface ConsoleService {
 		token: string;
 		reports: { repo: string; jobs: never[] }[];
 	}): Promise<{ recorded: number }>;
+	setSessionState(input: {
+		workerId: string;
+		token: string;
+		state: "active" | "stopped";
+	}): Promise<{ state: string }>;
 }
 
 export interface ConsoleRequestOptions {
@@ -74,6 +79,7 @@ export function consoleServiceFromRuntime(runtime: ConsoleRuntime): ConsoleServi
 		pollSession: (input) => runtime.pollSession(input),
 		ackSession: (input) => runtime.ackSession(input),
 		reportSession: (input) => runtime.reportSession(input),
+		setSessionState: (input) => runtime.setSessionState(input),
 	};
 }
 
@@ -303,6 +309,17 @@ export async function handleConsoleRequest(
 				return [{ dispatchKey, jobId, error }];
 			});
 			return json(await service.ackSession({ workerId, token, results: parsed }));
+		}
+
+		if (request.method === "POST" && url.pathname === "/api/session/state") {
+			const body = await readJson(request);
+			const workerId = body ? readString(body, "workerId") : null;
+			const token = bearer(request);
+			if (!body || !workerId || !token) {
+				return json({ error: "workerId and a session token are required" }, 401);
+			}
+			const state = body.state === "stopped" ? "stopped" : "active";
+			return json(await service.setSessionState({ workerId, token, state }));
 		}
 
 		if (request.method === "POST" && url.pathname === "/api/session/report") {

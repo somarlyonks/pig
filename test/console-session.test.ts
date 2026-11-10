@@ -183,6 +183,7 @@ test("backs off on console errors and stops when aborted", async () => {
 	options.fetch = (async (input: string | URL | Request) => {
 		const url = new URL(String(input));
 		if (url.pathname === "/api/session/report") return json({ recorded: 1 });
+		if (url.pathname === "/api/session/state") return json({ state: "active" });
 		polls.push(1);
 		return json({ error: "boom" }, 503);
 	}) as typeof fetch;

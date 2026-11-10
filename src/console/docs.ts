@@ -26,6 +26,8 @@ export interface WorkerDocValue {
 	baseUrl: string;
 	repos: string[];
 	capabilities: JsonValue[];
+	sessionState: "unknown" | "active" | "stopped";
+	sessionSeenAt: number;
 	createdAt: number;
 	updatedAt: number;
 }
@@ -43,6 +45,8 @@ export const WorkerDoc = defineDocFamily<WorkerDocValue, null>({
 		baseUrl: "",
 		repos: [],
 		capabilities: [],
+		sessionState: "unknown",
+		sessionSeenAt: 0,
 		createdAt: 0,
 		updatedAt: 0,
 	}),

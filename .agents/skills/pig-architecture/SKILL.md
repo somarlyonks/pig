@@ -75,6 +75,7 @@ Control jobs bypass the per-repository chain. Work/review/release are chained.
 - A console-originated command is identified by a dispatch key plus a claimed actor that must be re-verified against GitHub permissions. The console holds no GitHub credential; all GitHub access is PiG's installation token. Reply channel follows the origin: artifacts report on GitHub, informational commands answer in the console.
 - Console dispatch is at least once and deduplicated by dispatch key at admission; pending console records are delivery attempts, not a queue. The consumed cursor lives on the worker. Transport (`inbound`/`outbound`) is declared per worker, never negotiated, and outbound is an HTTPS long poll (25–35s), not WebSocket. Details: `ARCHITECTURE.md` §9.
 - The operator console is a separate app with its own storage: no shared database with a worker, no writes to job state, no conversation transcripts. Registration is an explicit one-time enrollment token, and capabilities are declared by the worker (name, params schema, scope, dangerous).
+- Console assistant output is proposals only. It validates against the worker's declaration and never dispatches; a person confirms, and dangerous capabilities confirm twice.
 - Work/review checkpoints: anchor and target/base before the push, pushed commit before PR bookkeeping; review URL after posting; release plan before tag.
 - Never push to the default branch. Force-push only PiG-named deterministic work branches.
 - Workflow edits are reverted unless explicitly allowed.

@@ -52,6 +52,8 @@ export interface WorkerView {
 	baseUrl: string;
 	repos: string[];
 	capabilities: CapabilityDescriptor[];
+	sessionState: "unknown" | "active" | "stopped";
+	sessionSeenAt: number;
 	registeredAt: number;
 	observations: { repo: string; observedAt: number; ok: boolean; error: string | null }[];
 }
@@ -179,6 +181,11 @@ export interface ConsoleRuntime {
 		token: string;
 		reports: { repo: string; jobs: JsonValue[] }[];
 	}): Promise<{ recorded: number }>;
+	setSessionState(input: {
+		workerId: string;
+		token: string;
+		state: "active" | "stopped";
+	}): Promise<{ state: string }>;
 	state(options?: { refresh?: boolean }): Promise<ConsoleState>;
 	shutdown(): Promise<void>;
 }
@@ -220,6 +227,8 @@ function toWorkerView(doc: WorkerDocValue, observations: { repo: string; observe
 		baseUrl: doc.baseUrl,
 		repos: doc.repos,
 		capabilities: capabilitiesFrom(doc.capabilities),
+		sessionState: doc.sessionState,
+		sessionSeenAt: doc.sessionSeenAt,
 		registeredAt: doc.createdAt,
 		observations,
 	};
@@ -872,6 +881,18 @@ export async function createConsoleRuntime(
 				updated += 1;
 			}
 			return { updated };
+		},
+
+		async setSessionState(input) {
+			await verifySessionToken(input.workerId, input.token);
+			await harness.commit(async (tx) => {
+				const doc = await tx.doc(WorkerDoc, input.workerId, null);
+				doc.sessionState = input.state;
+				doc.sessionSeenAt = now();
+				doc.updatedAt = now();
+				return undefined;
+			}, BACKGROUND_CONTEXT);
+			return { state: input.state };
 		},
 
 		async reportSession(input) {

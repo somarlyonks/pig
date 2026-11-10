@@ -103,6 +103,19 @@ export async function runConsoleSession(options: SessionOptions): Promise<void> 
 		}
 	}
 
+	async function announce(state: "active" | "stopped"): Promise<void> {
+		try {
+			await options.fetch(`${baseUrl}/api/session/state`, {
+				method: "POST",
+				headers,
+				body: JSON.stringify({ workerId: options.workerId, state }),
+			});
+		} catch (error) {
+			options.logger.debug("Could not announce the session state", { state, error });
+		}
+	}
+
+	await announce("active");
 	while (!options.signal.aborted) {
 		try {
 			if (now() - lastReport >= (options.reportEveryMs ?? 30_000)) {
@@ -122,6 +135,7 @@ export async function runConsoleSession(options: SessionOptions): Promise<void> 
 					workerId: options.workerId,
 					status: response.status,
 				});
+				await announce("stopped");
 				return;
 			}
 			if (!response.ok) {
@@ -177,7 +191,10 @@ export async function runConsoleSession(options: SessionOptions): Promise<void> 
 				await sleep(pollAfterMs);
 			}
 		} catch (error) {
-			if (options.signal.aborted) return;
+			if (options.signal.aborted) {
+				await announce("stopped");
+				return;
+			}
 			options.logger.warn("Console session error; retrying", {
 				workerId: options.workerId,
 				error: error instanceof Error ? error.message : String(error),
