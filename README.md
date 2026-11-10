@@ -369,6 +369,42 @@ curl -sS -X POST "https://pig-console.<account>.workers.dev/api/workers" \
 
 An outbound worker cannot be probed, so it must declare its capabilities in the registration. The console queues commands until the worker polls `GET /api/session/commands`, and the worker acknowledges them with the job it created. The cursor lives on the worker, so a console that loses its state cannot replay a command into a second job. On the PiG side, set `PIG_CONSOLE_URL`, `PIG_CONSOLE_WORKER_ID`, `PIG_CONSOLE_SESSION_TOKEN`, and `PIG_CONSOLE_REPOS`; `npm start` then maintains the session and reconnects with backoff. A rejected session token pauses the session until the worker is registered again.
 
+## Writing another worker
+
+The console only knows a worker through its declaration, so a second agent does not need console changes. `src/worker-kit/` implements the worker side of the protocol for any durable agent:
+
+```ts
+import { createWorkerKit } from "./worker-kit/kit.ts";
+
+const worker = createWorkerKit({
+  name: "mac-agent",
+  version: "0.1.0",
+  secret: process.env.MAC_AGENT_TOKEN,
+  handlers: [
+    {
+      capability: {
+        name: "chat.message",
+        description: "Send a message to the local agent",
+        scope: "repository",
+        dangerous: false,
+        parameters: [
+          { name: "conversation", type: "string", required: true, description: "Conversation id" },
+          { name: "text", type: "string", required: true, description: "Message text" },
+        ],
+      },
+      execute: async (params, context) => ({ jobId: await reply(params, context) }),
+    },
+  ],
+});
+
+// Serve worker.handle(request) over HTTPS, then register it with the console.
+```
+
+- Capabilities are declared, not hardcoded in the console, so a new kind of agent needs no console change.
+- Parameters are checked against the declaration on both sides; the worker is always the authority.
+- A dispatch key is remembered after a successful run, so a console retry returns the same job id instead of running it twice. A failed run is not remembered, so a retry may execute again.
+- For an agent behind NAT, register the worker as `outbound` and poll the console with `runConsoleSession`. The same `handle` can serve commands from a session instead of HTTP.
+
 ## Security
 
 PiG is an automation tool, not a sandbox boundary.

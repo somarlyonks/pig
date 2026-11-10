@@ -10,6 +10,7 @@ import {
 import type { CapabilityDescriptor } from "../dispatch/capabilities.ts";
 import type { Logger } from "../logger.ts";
 import { createNoModels } from "../durable/no-models.ts";
+import { validateParameters } from "../worker-kit/validate.ts";
 import { WorkerClient, WorkerRequestError, type WorkerJobState } from "./client.ts";
 import {
 	CounterDoc,
@@ -558,6 +559,10 @@ export async function createConsoleRuntime(
 					status: 400,
 					error: `worker ${input.workerId} does not declare ${input.capability}`,
 				};
+			}
+			const invalid = validateParameters(capability, input.params);
+			if (invalid !== null) {
+				return { ok: false, status: 400, error: invalid };
 			}
 			const repo = typeof input.params.repo === "string" ? input.params.repo : "";
 			if (!repo) {

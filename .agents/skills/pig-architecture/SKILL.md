@@ -55,6 +55,7 @@ Control jobs bypass the per-repository chain. Work/review/release are chained.
 - Cloudflare hosts: `src/cloudflare/` and `src/durable/cloudflare-coding-runtime.ts`
 - Console dispatch (worker side): `src/dispatch/` — planning, capabilities, dispatch keys, expiry
 - Operator console (separate app): `src/console/` + `src/cloudflare/console/`, `wrangler.console.jsonc`
+- Non-PiG worker kit (protocol without PiG): `src/worker-kit/`
 - Orchestration-only task: `src/durable/orchestration-task.ts`, `orchestration-runtime.ts`
 - GitHub handlers: `src/jobs/handlers/`
 - GitHub auth/metadata/config: `src/github/`
