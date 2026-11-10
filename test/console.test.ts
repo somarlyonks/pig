@@ -149,7 +149,7 @@ test("enrolls a worker and reads its capabilities from the worker", async () => 
 		assert.match(enrollment.token, /^enr_/);
 		assert.equal(enrollment.expiresAt, 1_000_000 + 60 * 60_000);
 
-		const worker = await app.runtime.registerWorker({
+		const registered = await app.runtime.registerWorker({
 			enrollmentToken: enrollment.token,
 			workerId: "pig-a",
 			kind: "pig",
@@ -158,6 +158,8 @@ test("enrolls a worker and reads its capabilities from the worker", async () => 
 			repos: ["acme/app"],
 			secret: "worker-secret",
 		});
+		const worker = registered.worker;
+		assert.match(registered.sessionToken, /^ses_/);
 		assert.equal(worker.workerId, "pig-a");
 		assert.equal(worker.baseUrl, WORKER);
 		assert.equal(worker.version, "1.2.3");
@@ -544,3 +546,180 @@ test("derives dispatch keys from proposal ids and hashes enrollment tokens", asy
 });
 
 void BACKGROUND_CONTEXT;
+
+async function registerOutbound(
+	runtime: ConsoleRuntime,
+	workerId = "pig-mac",
+): Promise<string> {
+	const enrollment = await runtime.createEnrollment({ label: "mac" });
+	const registered = await runtime.registerWorker({
+		enrollmentToken: enrollment.token,
+		workerId,
+		kind: "pig",
+		version: "0.1.0",
+		transport: "outbound",
+		baseUrl: "http://127.0.0.1:1",
+		repos: ["acme/app"],
+		secret: "worker-secret",
+		capabilities: PIG_CAPABILITIES,
+	});
+	return registered.sessionToken;
+}
+
+test("an outbound worker declares capabilities instead of being probed", async () => {
+	const calls: Call[] = [];
+	const app = await setup({ calls });
+	try {
+		const sessionToken = await registerOutbound(app.runtime);
+		assert.match(sessionToken, /^ses_/);
+		assert.equal(
+			calls.filter((call) => call.url.endsWith("/api/capabilities")).length,
+			0,
+		);
+		const workers = await app.runtime.listWorkers();
+		assert.equal(workers[0]?.transport, "outbound");
+		assert.ok(workers[0]?.capabilities.some((entry) => entry.name === "pig.work"));
+
+		const enrollment = await app.runtime.createEnrollment({ label: "mac" });
+		await assert.rejects(
+			app.runtime.registerWorker({
+				enrollmentToken: enrollment.token,
+				workerId: "pig-mac-2",
+				kind: "pig",
+				transport: "outbound",
+				baseUrl: "http://127.0.0.1:1",
+				repos: ["acme/app"],
+				secret: "s",
+			}),
+			/must declare its capabilities/,
+		);
+	} finally {
+		await app.runtime.shutdown();
+	}
+});
+
+test("queues a command for an outbound worker and delivers it on poll", async () => {
+	const calls: Call[] = [];
+	const app = await setup({ calls });
+	try {
+		const sessionToken = await registerOutbound(app.runtime);
+		const submitted = await app.runtime.submit({
+			workerId: "pig-mac",
+			capability: "pig.work",
+			params: { repo: "acme/app", instructions: "Add a test" },
+			actor: "alice",
+			proposalId: "mac-1",
+		});
+		assert.equal(submitted.status, 202);
+		assert.equal(submitted.body.queued, true);
+		assert.equal(
+			calls.filter((call) => call.method === "POST" && call.url.endsWith("/api/dispatch")).length,
+			0,
+		);
+
+		await assert.rejects(
+			app.runtime.pollSession({ workerId: "pig-mac", token: "ses_wrong", cursor: 0, waitMs: 0 }),
+			/invalid session token/,
+		);
+
+		const first = await app.runtime.pollSession({
+			workerId: "pig-mac",
+			token: sessionToken,
+			cursor: 0,
+			waitMs: 0,
+		});
+		assert.equal(first.commands.length, 1);
+		assert.equal(first.commands[0]?.dispatchKey, "console:mac-1");
+		assert.equal(first.commands[0]?.capability, "pig.work");
+		assert.equal(first.commands[0]?.actor, "alice");
+		assert.ok(first.cursor > 0);
+
+		const second = await app.runtime.pollSession({
+			workerId: "pig-mac",
+			token: sessionToken,
+			cursor: first.cursor,
+			waitMs: 0,
+		});
+		assert.equal(second.commands.length, 0);
+
+		const acked = await app.runtime.ackSession({
+			workerId: "pig-mac",
+			token: sessionToken,
+			results: [{ dispatchKey: "console:mac-1", jobId: "77", error: null }],
+		});
+		assert.equal(acked.updated, 1);
+		const accepted = await app.runtime.lookup("console:mac-1");
+		assert.equal(accepted?.state, "accepted");
+		assert.equal(accepted?.jobId, "77");
+
+		const ignored = await app.runtime.ackSession({
+			workerId: "pig-mac",
+			token: sessionToken,
+			results: [{ dispatchKey: "console:mac-1", jobId: "77", error: null }],
+		});
+		assert.equal(ignored.updated, 0);
+
+		const third = await app.runtime.pollSession({
+			workerId: "pig-mac",
+			token: sessionToken,
+			cursor: 0,
+			waitMs: 0,
+		});
+		assert.equal(third.commands.length, 0, "an accepted command is not redelivered");
+	} finally {
+		await app.runtime.shutdown();
+	}
+});
+
+test("an outbound worker reports its own observations", async () => {
+	const calls: Call[] = [];
+	const app = await setup({ calls });
+	try {
+		const sessionToken = await registerOutbound(app.runtime);
+		const reported = await app.runtime.reportSession({
+			workerId: "pig-mac",
+			token: sessionToken,
+			reports: [
+				{
+					repo: "acme/app",
+					jobs: [
+						{
+							id: "9",
+							kind: "work",
+							origin: "console",
+							status: "running",
+							attempts: 1,
+							maxAttempts: 2,
+							createdAt: 5,
+							summary: "",
+							error: null,
+						},
+					],
+				},
+				{ repo: "other/app", jobs: [] },
+			],
+		});
+		assert.equal(reported.recorded, 1, "a repository outside the scope is not recorded");
+
+		const state = await app.runtime.state({ refresh: true });
+		assert.equal(state.jobs.length, 1);
+		assert.equal(state.jobs[0]?.workerId, "pig-mac");
+		assert.equal(state.workers[0]?.observations[0]?.ok, true);
+		assert.equal(
+			calls.filter((call) => call.url.includes("/api/jobs")).length,
+			0,
+			"an outbound worker is never dialled",
+		);
+
+		await assert.rejects(
+			app.runtime.reportSession({
+				workerId: "pig-mac",
+				token: "ses_wrong",
+				reports: [],
+			}),
+			/invalid session token/,
+		);
+	} finally {
+		await app.runtime.shutdown();
+	}
+});

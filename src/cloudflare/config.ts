@@ -32,5 +32,6 @@ export function cloudflareConfig(env: CloudflareEnv): AppConfig {
 		jobTimeoutMs: 30 * 60_000,
 		logLevel: "info",
 		adminToken: env.PIG_ADMIN_TOKEN?.trim() || undefined,
+		console: null,
 	};
 }

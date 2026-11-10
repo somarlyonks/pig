@@ -120,6 +120,7 @@ function config(workspaceRoot: string): AppConfig {
 		jobTimeoutMs: 60_000,
 		logLevel: "error",
 		adminToken: undefined,
+		console: null,
 	};
 }
 

@@ -38,6 +38,7 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
 		jobTimeoutMs: 60_000,
 		logLevel: "error",
 		adminToken: "admin-token",
+		console: null,
 		...overrides,
 	};
 }

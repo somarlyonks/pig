@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { loadConfig } from "./config.ts";
+import { runConsoleSession } from "./console/session-client.ts";
 import { openPigApp } from "./durable/app.ts";
 import { createLogger } from "./logger.ts";
 import { startHttpServer, type RunningServer } from "./server.ts";
@@ -23,10 +24,12 @@ async function main(): Promise<void> {
 	const app = await openPigApp(config, logger);
 	let runningServer: RunningServer | null = null;
 	let shuttingDown = false;
+	const sessionController = new AbortController();
 
 	const shutdown = async (signal: string, exitCode = 0): Promise<void> => {
 		if (shuttingDown) return;
 		shuttingDown = true;
+		sessionController.abort();
 		logger.info("Shutting down", { signal, exitCode });
 		try {
 			if (runningServer) {
@@ -69,6 +72,27 @@ async function main(): Promise<void> {
 		logger.error("Could not start HTTP server", { error });
 		await app.shutdown().catch(() => undefined);
 		process.exit(1);
+	}
+
+	if (config.console) {
+		const session = config.console;
+		void runConsoleSession({
+			consoleBaseUrl: session.baseUrl,
+			workerId: session.workerId,
+			token: session.token,
+			repos: session.repos,
+			fetch,
+			dispatch: (input) => app.dispatch(input),
+			listJobs: (repo, limit) => app.listJobs(repo, limit),
+			logger,
+			signal: sessionController.signal,
+		}).catch((error) => {
+			logger.error("Console session stopped", { error });
+		});
+		logger.info("Console session started", {
+			workerId: session.workerId,
+			repos: session.repos.length,
+		});
 	}
 
 	logger.info("PiG started", {

@@ -87,7 +87,11 @@ Common:
 | `PIG_THINKING` | model default / suffix | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
 | `PIG_JOB_TIMEOUT_MINUTES` | `30` | hard cap for one agent run |
 | `PIG_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
-| `PIG_ADMIN_TOKEN` | unset | enables authenticated job inspection endpoints |
+| `PIG_ADMIN_TOKEN` | unset | enables authenticated job inspection and dispatch endpoints |
+| `PIG_CONSOLE_URL` | unset | operator console base URL for an outbound session |
+| `PIG_CONSOLE_WORKER_ID` | unset | this instance's worker id in the console |
+| `PIG_CONSOLE_SESSION_TOKEN` | unset | console-issued token for polling commands |
+| `PIG_CONSOLE_REPOS` | unset | comma-separated repositories this instance reports to the console |
 
 Model credentials are read by `pi-ai` from the process environment. Typical keys are `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, and provider-specific Amazon Bedrock or Vertex AI variables. See [Pi's provider documentation](https://github.com/earendil-works/pi/blob/main/packages/ai/README.md#environment-variables).
 
@@ -324,7 +328,7 @@ npx wrangler secret put PIG_CONSOLE_TOKEN -c wrangler.console.jsonc
 npm run console:deploy          # or: npm run console:dev for a local board
 ```
 
-Register a PiG worker once. Create an enrollment token in the board, then hand it to the worker's owner:
+Register a PiG worker once. Create an enrollment token in the board, then hand it to the worker's owner. Registration returns a `sessionToken`; keep it secret and give it to the worker.
 
 ```bash
 curl -sS -X POST "https://pig-console.<account>.workers.dev/api/workers" \
@@ -342,8 +346,28 @@ curl -sS -X POST "https://pig-console.<account>.workers.dev/api/workers" \
 The console asks the worker for `GET /api/capabilities`, so capabilities come from the worker, not from the registration form. Registration is single-use and expiring, because registering a worker grants the console the right to run its commands.
 
 - The console stores each worker's API token because it must call that worker. Give every worker its own token and keep the console isolated.
+- A worker behind NAT registers as `outbound`. It declares its own capabilities, receives commands by long-polling the console, and pushes its observations back, so the console never dials it.
 - A dangerous capability (`pig.release`, `pig.cancel`) always needs a confirmation from the board before it is sent.
 - The board shows observed jobs only. "Never observed" and "observed and idle" are different states; the console cannot enumerate a Cloudflare host's repositories.
+
+A worker behind NAT registers as an outbound session instead:
+
+```bash
+curl -sS -X POST "https://pig-console.<account>.workers.dev/api/workers" \
+  -H "content-type: application/json" \
+  -d '{
+    "enrollmentToken": "enr_...",
+    "workerId": "pig-mac",
+    "kind": "pig",
+    "transport": "outbound",
+    "baseUrl": "unused",
+    "repos": ["owner/name"],
+    "secret": "unused",
+    "capabilities": [...]
+  }'
+```
+
+An outbound worker cannot be probed, so it must declare its capabilities in the registration. The console queues commands until the worker polls `GET /api/session/commands`, and the worker acknowledges them with the job it created. The cursor lives on the worker, so a console that loses its state cannot replay a command into a second job. On the PiG side, set `PIG_CONSOLE_URL`, `PIG_CONSOLE_WORKER_ID`, `PIG_CONSOLE_SESSION_TOKEN`, and `PIG_CONSOLE_REPOS`; `npm start` then maintains the session and reconnects with backoff. A rejected session token pauses the session until the worker is registered again.
 
 ## Security
 

@@ -88,6 +88,7 @@ function config(): AppConfig {
 		jobTimeoutMs: 60_000,
 		logLevel: "error",
 		adminToken: undefined,
+		console: null,
 	};
 }
 

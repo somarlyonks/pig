@@ -2,6 +2,13 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { isLogLevel, type LogLevel } from "./logger.ts";
 
+export interface ConsoleSessionConfig {
+	baseUrl: string;
+	workerId: string;
+	token: string;
+	repos: string[];
+}
+
 export interface AppConfig {
 	appId: number;
 	privateKey: string;
@@ -16,6 +23,7 @@ export interface AppConfig {
 	jobTimeoutMs: number;
 	logLevel: LogLevel;
 	adminToken: string | undefined;
+	console: ConsoleSessionConfig | null;
 }
 
 function requireValue(env: NodeJS.ProcessEnv, name: string): string {
@@ -94,5 +102,27 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
 		jobTimeoutMs: jobTimeoutMinutes * 60 * 1000,
 		logLevel: logLevelRaw,
 		adminToken: env.PIG_ADMIN_TOKEN?.trim() || undefined,
+		console: loadConsoleSession(env),
+	};
+}
+
+function loadConsoleSession(env: NodeJS.ProcessEnv): ConsoleSessionConfig | null {
+	const baseUrl = env.PIG_CONSOLE_URL?.trim();
+	const workerId = env.PIG_CONSOLE_WORKER_ID?.trim();
+	const token = env.PIG_CONSOLE_SESSION_TOKEN?.trim();
+	if (!baseUrl && !workerId && !token) return null;
+	if (!baseUrl || !workerId || !token) {
+		throw new Error(
+			"Set PIG_CONSOLE_URL, PIG_CONSOLE_WORKER_ID, and PIG_CONSOLE_SESSION_TOKEN together",
+		);
+	}
+	return {
+		baseUrl,
+		workerId,
+		token,
+		repos: (env.PIG_CONSOLE_REPOS ?? "")
+			.split(",")
+			.map((repo) => repo.trim())
+			.filter((repo) => repo.includes("/")),
 	};
 }

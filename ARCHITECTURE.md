@@ -325,6 +325,7 @@ An operator console is an optional client that submits commands to workers and o
 - The console stores what it read and when it read it. Observations are a cache with an observation time, never authority.
 - Observations are keyed by worker, repository, and job, and reconciled by the job's state revision rather than by last write.
 - A worker's repository set is what it declared plus what the console observed, because the Cloudflare host cannot enumerate its own repositories. The console shows "never observed" differently from "observed and idle".
+- An outbound worker is never dialled. It pushes its own observations on each session, and the console records them with the time they were reported.
 - A console that loses its observations loses no work and no authoritative state; it rebuilds by reading workers again.
 - Console v1 is a status board plus a command box. A natural-language layer may sit above them later, but neither depends on one, and every dispatched command is a structured proposal with its target, write target, and parameters shown and confirmed before it is sent.
 

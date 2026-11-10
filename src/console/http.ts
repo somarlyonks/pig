@@ -1,4 +1,10 @@
-import type { ConsoleState, ConsoleRuntime, StateDispatch, WorkerView } from "./runtime.ts";
+import type {
+	ConsoleState,
+	ConsoleRuntime,
+	SessionCommand,
+	StateDispatch,
+	WorkerView,
+} from "./runtime.ts";
 import { WorkerRequestError } from "./client.ts";
 
 export interface ConsoleService {
@@ -15,7 +21,7 @@ export interface ConsoleService {
 		baseUrl: string;
 		repos: string[];
 		secret: string;
-	}): Promise<WorkerView>;
+	}): Promise<{ worker: WorkerView; sessionToken: string }>;
 	listWorkers(): Promise<WorkerView[]>;
 	submit(input: {
 		workerId: string;
@@ -26,6 +32,22 @@ export interface ConsoleService {
 		confirm?: boolean;
 	}): Promise<{ status: number; body: Record<string, unknown> }>;
 	lookup(dispatchKey: string): Promise<StateDispatch | null>;
+	pollSession(input: {
+		workerId: string;
+		token: string;
+		cursor: number;
+		waitMs: number;
+	}): Promise<{ commands: SessionCommand[]; cursor: number; pollAfterMs: number }>;
+	ackSession(input: {
+		workerId: string;
+		token: string;
+		results: { dispatchKey: string; jobId: string | null; error: string | null }[];
+	}): Promise<{ updated: number }>;
+	reportSession(input: {
+		workerId: string;
+		token: string;
+		reports: { repo: string; jobs: never[] }[];
+	}): Promise<{ recorded: number }>;
 }
 
 export interface ConsoleRequestOptions {
@@ -42,6 +64,9 @@ export function consoleServiceFromRuntime(runtime: ConsoleRuntime): ConsoleServi
 		listWorkers: () => runtime.listWorkers(),
 		submit: (input) => runtime.submit(input),
 		lookup: (key) => runtime.lookup(key),
+		pollSession: (input) => runtime.pollSession(input),
+		ackSession: (input) => runtime.ackSession(input),
+		reportSession: (input) => runtime.reportSession(input),
 	};
 }
 
@@ -63,6 +88,13 @@ function isAdmin(request: Request, token: string | undefined): boolean {
 	const authorization = request.headers.get("authorization");
 	if (!authorization?.startsWith("Bearer ")) return false;
 	return tokenEquals(authorization.slice("Bearer ".length).trim(), token);
+}
+
+function bearer(request: Request): string | null {
+	const authorization = request.headers.get("authorization");
+	if (!authorization?.startsWith("Bearer ")) return null;
+	const token = authorization.slice("Bearer ".length).trim();
+	return token === "" ? null : token;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -160,7 +192,7 @@ export async function handleConsoleRequest(
 					400,
 				);
 			}
-			const worker = await service.registerWorker({
+			const registered = await service.registerWorker({
 				enrollmentToken,
 				workerId,
 				kind: kind ?? "worker",
@@ -168,8 +200,19 @@ export async function handleConsoleRequest(
 				baseUrl,
 				repos: readStringList(body, "repos"),
 				secret,
+				...(Array.isArray(body.capabilities)
+					? { capabilities: body.capabilities as never[] }
+					: {}),
+				...(readString(body, "version") ? { version: readString(body, "version") as string } : {}),
 			});
-			return json({ ok: true, worker }, 201);
+			return json(
+				{
+					ok: true,
+					worker: registered.worker,
+					sessionToken: registered.sessionToken,
+				},
+				201,
+			);
 		}
 
 		if (request.method === "POST" && url.pathname === "/api/commands") {
@@ -196,6 +239,60 @@ export async function handleConsoleRequest(
 				...(body.confirm === true ? { confirm: true } : {}),
 			});
 			return json(result.body, result.status);
+		}
+
+		if (request.method === "GET" && url.pathname === "/api/session/commands") {
+			const workerId = url.searchParams.get("workerId") ?? "";
+			const token = bearer(request);
+			const cursor = Number(url.searchParams.get("cursor") ?? "0");
+			const waitMs = Number(url.searchParams.get("waitMs") ?? "0");
+			if (!workerId || !token) {
+				return json({ error: "workerId and a session token are required" }, 401);
+			}
+			return json(
+				await service.pollSession({
+					workerId,
+					token,
+					cursor: Number.isFinite(cursor) && cursor > 0 ? Math.floor(cursor) : 0,
+					waitMs: Number.isFinite(waitMs) && waitMs > 0 ? Math.floor(waitMs) : 0,
+				}),
+			);
+		}
+
+		if (request.method === "POST" && url.pathname === "/api/session/ack") {
+			const body = await readJson(request);
+			const workerId = body ? readString(body, "workerId") : null;
+			const token = bearer(request);
+			if (!body || !workerId || !token) {
+				return json({ error: "workerId and a session token are required" }, 401);
+			}
+			const results = Array.isArray(body.results) ? body.results : [];
+			const parsed = results.flatMap((entry) => {
+				const record = asRecord(entry);
+				const dispatchKey = record ? readString(record, "dispatchKey") : null;
+				if (!record || !dispatchKey) return [];
+				const jobId = record.jobId === null || record.jobId === undefined ? null : String(record.jobId);
+				const error = typeof record.error === "string" ? record.error : null;
+				return [{ dispatchKey, jobId, error }];
+			});
+			return json(await service.ackSession({ workerId, token, results: parsed }));
+		}
+
+		if (request.method === "POST" && url.pathname === "/api/session/report") {
+			const body = await readJson(request);
+			const workerId = body ? readString(body, "workerId") : null;
+			const token = bearer(request);
+			if (!body || !workerId || !token) {
+				return json({ error: "workerId and a session token are required" }, 401);
+			}
+			const reports = Array.isArray(body.reports) ? body.reports : [];
+			const parsed = reports.flatMap((entry) => {
+				const record = asRecord(entry);
+				const repo = record ? readString(record, "repo") : null;
+				if (!record || !repo) return [];
+				return [{ repo, jobs: (Array.isArray(record.jobs) ? record.jobs : []) as never[] }];
+			});
+			return json(await service.reportSession({ workerId, token, reports: parsed }));
 		}
 
 		if (request.method === "GET" && url.pathname.startsWith("/api/dispatches/")) {

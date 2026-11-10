@@ -12,9 +12,11 @@ import type { Logger } from "../logger.ts";
 import { createNoModels } from "../durable/no-models.ts";
 import { WorkerClient, WorkerRequestError, type WorkerJobState } from "./client.ts";
 import {
+	CounterDoc,
 	DispatchDoc,
 	DispatchIndexDoc,
 	EnrollmentDoc,
+	SessionTokenDoc,
 	ObservationDoc,
 	RegistryDoc,
 	WorkerCredentialDoc,
@@ -78,6 +80,15 @@ export interface ConsoleState {
 	dispatches: StateDispatch[];
 }
 
+export interface SessionCommand {
+	seq: number;
+	dispatchKey: string;
+	capability: string;
+	params: Record<string, unknown>;
+	actor: string;
+	notAfter: number | null;
+}
+
 export interface ConsoleProposal {
 	dispatchKey: string;
 	proposalId: string;
@@ -101,6 +112,7 @@ export interface ConsoleRuntimeOptions {
 	logger: Logger;
 	fetch: typeof fetch;
 	now?: () => number;
+	sleep?: (ms: number) => Promise<void>;
 	onWake?: (wake: Wake) => void;
 }
 
@@ -117,11 +129,13 @@ export interface ConsoleRuntime {
 		enrollmentToken: string;
 		workerId: string;
 		kind: string;
+		version?: string;
 		transport: ConsoleTransport;
 		baseUrl: string;
 		repos: string[];
 		secret: string;
-	}): Promise<WorkerView>;
+		capabilities?: CapabilityDescriptor[];
+	}): Promise<{ worker: WorkerView; sessionToken: string }>;
 	listWorkers(): Promise<WorkerView[]>;
 	propose(input: {
 		workerId: string;
@@ -139,6 +153,22 @@ export interface ConsoleRuntime {
 		confirm?: boolean;
 	}): Promise<{ status: number; body: Record<string, unknown> }>;
 	lookup(dispatchKey: string): Promise<StateDispatch | null>;
+	pollSession(input: {
+		workerId: string;
+		token: string;
+		cursor: number;
+		waitMs: number;
+	}): Promise<{ commands: SessionCommand[]; cursor: number; pollAfterMs: number }>;
+	ackSession(input: {
+		workerId: string;
+		token: string;
+		results: { dispatchKey: string; jobId: string | null; error: string | null }[];
+	}): Promise<{ updated: number }>;
+	reportSession(input: {
+		workerId: string;
+		token: string;
+		reports: { repo: string; jobs: JsonValue[] }[];
+	}): Promise<{ recorded: number }>;
 	state(options?: { refresh?: boolean }): Promise<ConsoleState>;
 	shutdown(): Promise<void>;
 }
@@ -310,7 +340,17 @@ export async function createConsoleRuntime(
 	): Promise<void> {
 		await harness.commit(async (tx) => {
 			const value = await tx.doc(DispatchDoc, doc.dispatchKey, null);
+			const index = await tx.doc(DispatchIndexDoc);
+			const isNew = !index.keys.includes(doc.dispatchKey);
+			let seq = value.seq;
+			if (isNew) {
+				const counter = await tx.doc(CounterDoc);
+				counter.seq += 1;
+				seq = counter.seq;
+				index.keys = [...index.keys, doc.dispatchKey].slice(-MAX_RECENT_DISPATCHES);
+			}
 			Object.assign(value, {
+				seq,
 				dispatchKey: doc.dispatchKey,
 				proposalId: doc.proposalId,
 				workerId: doc.workerId,
@@ -324,12 +364,44 @@ export async function createConsoleRuntime(
 				createdAt: doc.createdAt,
 				updatedAt: now(),
 			} satisfies DispatchDocValue);
-			const index = await tx.doc(DispatchIndexDoc);
-			if (!index.keys.includes(doc.dispatchKey)) {
-				index.keys = [...index.keys, doc.dispatchKey].slice(-MAX_RECENT_DISPATCHES);
-			}
 			return undefined;
 		}, BACKGROUND_CONTEXT);
+	}
+
+	const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+	async function verifySessionToken(workerId: string, token: string): Promise<void> {
+		const stored = await harness.snapshot(SessionTokenDoc, workerId, BACKGROUND_CONTEXT);
+		if (!stored?.hash) {
+			throw new WorkerRequestError(`worker ${workerId} has no session token`, 401);
+		}
+		const provided = await hashToken(token.trim());
+		if (provided !== stored.hash) {
+			throw new WorkerRequestError("invalid session token", 401);
+		}
+	}
+
+	async function pendingCommands(workerId: string, cursor: number): Promise<SessionCommand[]> {
+		const index = await harness.snapshot(DispatchIndexDoc, BACKGROUND_CONTEXT);
+		const keys = index?.keys ?? [];
+		const pending: SessionCommand[] = [];
+		for (const key of keys) {
+			const doc = await harness.snapshot(DispatchDoc, key, BACKGROUND_CONTEXT);
+			if (!doc) continue;
+			if (doc.workerId !== workerId) continue;
+			if (doc.state !== "submitted") continue;
+			if (doc.seq <= cursor) continue;
+			pending.push({
+				seq: doc.seq,
+				dispatchKey: doc.dispatchKey,
+				capability: doc.capability,
+				params: doc.params as Record<string, unknown>,
+				actor: doc.actor,
+				notAfter: null,
+			});
+		}
+		pending.sort((a, b) => a.seq - b.seq);
+		return pending;
 	}
 
 	const runtime: ConsoleRuntime = {
@@ -374,31 +446,41 @@ export async function createConsoleRuntime(
 			if (input.repos.length === 0) {
 				throw new WorkerRequestError("a worker must declare at least one repository", 400);
 			}
-			if (input.transport !== "inbound") {
-				throw new WorkerRequestError(
-					"outbound workers are not supported yet; register an inbound worker",
-					400,
-				);
-			}
-
-			const probe = new WorkerClient({
-				fetch: options.fetch,
-				baseUrl: input.baseUrl,
-				secret: input.secret,
-				timeoutMs: config.workerTimeoutMs,
-			});
 			let described: { name: string; version: string; capabilities: CapabilityDescriptor[] };
-			try {
-				described = await probe.describe();
-			} catch (error) {
-				throw new WorkerRequestError(
-					`worker did not answer /api/capabilities: ${error instanceof Error ? error.message : String(error)}`,
-					400,
-				);
+			if (input.transport === "outbound") {
+				if (!input.capabilities || input.capabilities.length === 0) {
+					throw new WorkerRequestError(
+						"an outbound worker cannot be reached, so it must declare its capabilities",
+						400,
+					);
+				}
+				described = {
+					name: input.kind,
+					version: input.version ?? "unknown",
+					capabilities: input.capabilities,
+				};
+			} else {
+				const probe = new WorkerClient({
+					fetch: options.fetch,
+					baseUrl: input.baseUrl,
+					secret: input.secret,
+					timeoutMs: config.workerTimeoutMs,
+				});
+				try {
+					described = await probe.describe();
+				} catch (error) {
+					throw new WorkerRequestError(
+						`worker did not answer /api/capabilities: ${error instanceof Error ? error.message : String(error)}`,
+						400,
+					);
+				}
 			}
 			if (described.capabilities.length === 0) {
 				throw new WorkerRequestError("worker declared no capabilities", 400);
 			}
+
+			const sessionToken = newToken("ses");
+			const sessionHash = await hashToken(sessionToken);
 
 			await harness.commit(async (tx) => {
 				const doc = await tx.doc(WorkerDoc, input.workerId, null);
@@ -420,6 +502,10 @@ export async function createConsoleRuntime(
 					registryDoc.workerIds = [...registryDoc.workerIds, input.workerId];
 				}
 
+				const session = await tx.doc(SessionTokenDoc, input.workerId, null);
+				session.hash = sessionHash;
+				session.issuedAt = now();
+
 				const used = await tx.doc(EnrollmentDoc, enrollmentKey, null);
 				used.usedAt = now();
 				used.workerId = input.workerId;
@@ -431,9 +517,10 @@ export async function createConsoleRuntime(
 			logger.info("Registered console worker", {
 				workerId: input.workerId,
 				kind: input.kind,
+				transport: input.transport,
 				capabilities: described.capabilities.length,
 			});
-			return toWorkerView(worker, []);
+			return { worker: toWorkerView(worker, []), sessionToken };
 		},
 
 		async listWorkers() {
@@ -538,6 +625,17 @@ export async function createConsoleRuntime(
 				createdAt,
 			});
 
+			const worker = await readWorker(proposal.workerId);
+			if (worker?.transport === "outbound") {
+				return {
+					status: 202,
+					body: {
+						ok: true,
+						queued: true,
+						dispatch: await runtime.lookup(proposal.dispatchKey),
+					},
+				};
+			}
 			try {
 				const { client } = await clientFor(proposal.workerId);
 				const response = await client.dispatch({
@@ -606,6 +704,8 @@ export async function createConsoleRuntime(
 			const doc = await harness.snapshot(DispatchDoc, dispatchKey, BACKGROUND_CONTEXT);
 			if (!doc) return null;
 			if (doc.state === "accepted") return toDispatchView(doc);
+			const worker = await readWorker(doc.workerId);
+			if (worker?.transport === "outbound") return toDispatchView(doc);
 			try {
 				const { client } = await clientFor(doc.workerId);
 				const detail = await client.jobByDispatchKey(dispatchKey);
@@ -642,7 +742,9 @@ export async function createConsoleRuntime(
 			for (const worker of initial) {
 				const observations = await observationsFor(worker.workerId);
 				for (const observation of observations) {
-					const stale = stateOptions.refresh === true &&
+					const stale =
+						stateOptions.refresh === true &&
+						worker.transport !== "outbound" &&
 						now() - observation.observedAt > config.observationTtlMs;
 					const current = stale
 						? await refreshObservation(worker.workerId, observation.repo)
@@ -669,6 +771,82 @@ export async function createConsoleRuntime(
 				if (doc) dispatches.push(toDispatchView(doc));
 			}
 			return { now: now(), workers, jobs, dispatches };
+		},
+
+		async pollSession(input) {
+			await verifySessionToken(input.workerId, input.token);
+			const deadline = now() + Math.max(0, Math.min(input.waitMs, 25_000));
+			for (;;) {
+				const commands = await pendingCommands(input.workerId, input.cursor);
+				const last = commands.at(-1);
+				if (last !== undefined) {
+					return {
+						commands,
+						cursor: last.seq,
+						pollAfterMs: 0,
+					};
+				}
+				if (now() >= deadline) {
+					return { commands: [], cursor: input.cursor, pollAfterMs: 2_000 };
+				}
+				await sleep(Math.min(500, Math.max(1, deadline - now())));
+			}
+		},
+
+		async ackSession(input) {
+			await verifySessionToken(input.workerId, input.token);
+			let updated = 0;
+			for (const result of input.results) {
+				const doc = await harness.snapshot(
+					DispatchDoc,
+					result.dispatchKey,
+					BACKGROUND_CONTEXT,
+				);
+				if (!doc || doc.workerId !== input.workerId) continue;
+				if (doc.state === "accepted") continue;
+				await recordDispatch({
+					dispatchKey: doc.dispatchKey,
+					proposalId: doc.proposalId,
+					workerId: doc.workerId,
+					repo: doc.repo,
+					capability: doc.capability,
+					params: doc.params as Record<string, unknown>,
+					actor: doc.actor,
+					state: result.error === null ? "accepted" : "rejected",
+					jobId: result.jobId,
+					error: result.error,
+					createdAt: doc.createdAt,
+				});
+				updated += 1;
+			}
+			return { updated };
+		},
+
+		async reportSession(input) {
+			await verifySessionToken(input.workerId, input.token);
+			const worker = await readWorker(input.workerId);
+			if (!worker) throw new WorkerRequestError(`unknown worker: ${input.workerId}`, 404);
+			let recorded = 0;
+			for (const report of input.reports) {
+				if (!repoAllowed(worker, report.repo)) continue;
+				const observedAt = now();
+				await harness.commit(async (tx) => {
+					const doc = await tx.doc(
+						ObservationDoc,
+						workerKey(input.workerId, report.repo),
+						null,
+					);
+					doc.workerId = input.workerId;
+					doc.repo = report.repo;
+					doc.observedAt = observedAt;
+					doc.ok = true;
+					doc.error = null;
+					doc.jobs = report.jobs.slice(0, MAX_OBSERVED_JOBS);
+					return undefined;
+				}, BACKGROUND_CONTEXT);
+				recorded += 1;
+			}
+			return { recorded };
 		},
 
 		shutdown: () => harness.close(BACKGROUND_CONTEXT),

@@ -90,8 +90,39 @@ export const EnrollmentDoc = defineDocFamily<EnrollmentDocValue, null>({
 
 export type DispatchState = "submitted" | "accepted" | "rejected";
 
+/** Monotonic console-local sequence, so a poller can resume from a cursor. */
+export interface CounterDocValue {
+	[key: string]: JsonValue;
+	seq: number;
+}
+
+export const CounterDoc = defineDoc<CounterDocValue>({
+	kind: "console.counter",
+	version: 1,
+	scope: "session",
+	initial: () => ({ seq: 0 }),
+	checkpointWhen: () => false,
+});
+
+/** Hash of the token a worker uses to poll the console. Never stored in clear. */
+export interface SessionTokenDocValue {
+	[key: string]: JsonValue;
+	hash: string;
+	issuedAt: number;
+}
+
+export const SessionTokenDoc = defineDocFamily<SessionTokenDocValue, null>({
+	kind: "console.session-token",
+	version: 1,
+	scope: "session",
+	family: true,
+	initial: () => ({ hash: "", issuedAt: 0 }),
+	checkpointWhen: () => false,
+});
+
 export interface DispatchDocValue {
 	[key: string]: JsonValue;
+	seq: number;
 	dispatchKey: string;
 	proposalId: string;
 	workerId: string;
@@ -112,6 +143,7 @@ export const DispatchDoc = defineDocFamily<DispatchDocValue, null>({
 	scope: "session",
 	family: true,
 	initial: () => ({
+		seq: 0,
 		dispatchKey: "",
 		proposalId: "",
 		workerId: "",
