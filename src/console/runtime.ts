@@ -21,6 +21,7 @@ import {
 	EnrollmentDoc,
 	SessionTokenDoc,
 	ObservationDoc,
+	PendingDoc,
 	RegistryDoc,
 	WorkerCredentialDoc,
 	WorkerDoc,
@@ -42,6 +43,7 @@ export interface ConsoleConfig {
 }
 
 const MAX_RECENT_DISPATCHES = 50;
+const MAX_PENDING_COMMANDS = 1_000;
 const MAX_OBSERVED_JOBS = 20;
 
 export interface WorkerView {
@@ -368,6 +370,24 @@ export async function createConsoleRuntime(
 				seq = counter.seq;
 				index.keys = [...index.keys, doc.dispatchKey].slice(-MAX_RECENT_DISPATCHES);
 			}
+			const pending = await tx.doc(PendingDoc);
+			const remaining = pending.entries.filter(
+				(entry) => entry.dispatchKey !== doc.dispatchKey,
+			);
+			const entries =
+				doc.state === "submitted"
+					? [
+							...remaining,
+							{ seq, dispatchKey: doc.dispatchKey, workerId: doc.workerId },
+						].sort((left, right) => left.seq - right.seq)
+					: remaining;
+			if (entries.length > MAX_PENDING_COMMANDS) {
+				logger.warn("Pending console commands are piling up", {
+					count: entries.length,
+					workerId: doc.workerId,
+				});
+			}
+			pending.entries = entries.slice(-MAX_PENDING_COMMANDS);
 			Object.assign(value, {
 				seq,
 				dispatchKey: doc.dispatchKey,
@@ -401,15 +421,19 @@ export async function createConsoleRuntime(
 	}
 
 	async function pendingCommands(workerId: string, cursor: number): Promise<SessionCommand[]> {
-		const index = await harness.snapshot(DispatchIndexDoc, BACKGROUND_CONTEXT);
-		const keys = index?.keys ?? [];
+		const pendingDoc = await harness.snapshot(PendingDoc, BACKGROUND_CONTEXT);
+		const entries = (pendingDoc?.entries ?? []).filter(
+			(entry) => entry.workerId === workerId && entry.seq > cursor,
+		);
 		const pending: SessionCommand[] = [];
-		for (const key of keys) {
-			const doc = await harness.snapshot(DispatchDoc, key, BACKGROUND_CONTEXT);
+		for (const entry of entries) {
+			const doc = await harness.snapshot(
+				DispatchDoc,
+				entry.dispatchKey,
+				BACKGROUND_CONTEXT,
+			);
 			if (!doc) continue;
-			if (doc.workerId !== workerId) continue;
 			if (doc.state !== "submitted") continue;
-			if (doc.seq <= cursor) continue;
 			pending.push({
 				seq: doc.seq,
 				dispatchKey: doc.dispatchKey,

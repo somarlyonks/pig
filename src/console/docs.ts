@@ -178,6 +178,24 @@ export const DispatchIndexDoc = defineDoc<DispatchIndexDocValue>({
 	checkpointWhen: () => false,
 });
 
+/**
+ * Undelivered commands, ordered by sequence. It is not a queue of record: an
+ * entry disappears once the worker accepts the command, and replaying a lossy
+ * entry is safe because the worker deduplicates by dispatch key.
+ */
+export interface PendingDocValue {
+	[key: string]: JsonValue;
+	entries: { seq: number; dispatchKey: string; workerId: string }[];
+}
+
+export const PendingDoc = defineDoc<PendingDocValue>({
+	kind: "console.pending",
+	version: 1,
+	scope: "session",
+	initial: () => ({ entries: [] }),
+	checkpointWhen: () => false,
+});
+
 export interface ObservationDocValue {
 	[key: string]: JsonValue;
 	workerId: string;

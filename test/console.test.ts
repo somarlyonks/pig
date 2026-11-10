@@ -761,3 +761,55 @@ test("an outbound worker announces when its session starts and stops", async () 
 		await app.runtime.shutdown();
 	}
 });
+
+test("delivers every pending command, not only the recent ones", async () => {
+	const calls: Call[] = [];
+	const app = await setup({ calls });
+	try {
+		const sessionToken = await registerOutbound(app.runtime);
+		for (let index = 0; index < 60; index += 1) {
+			const result = await app.runtime.submit({
+				workerId: "pig-mac",
+				capability: "pig.status",
+				params: { repo: "acme/app" },
+				actor: "alice",
+				proposalId: `bulk-${index}`,
+			});
+			assert.equal(result.status, 202);
+		}
+
+		const first = await app.runtime.pollSession({
+			workerId: "pig-mac",
+			token: sessionToken,
+			cursor: 0,
+			waitMs: 0,
+		});
+		assert.equal(first.commands.length, 60);
+		assert.equal(first.commands[0]?.dispatchKey, "console:bulk-0");
+		assert.equal(first.commands.at(-1)?.dispatchKey, "console:bulk-59");
+
+		const accepted = await app.runtime.ackSession({
+			workerId: "pig-mac",
+			token: sessionToken,
+			results: first.commands.map((command) => ({
+				dispatchKey: command.dispatchKey,
+				jobId: "1",
+				error: null,
+			})),
+		});
+		assert.equal(accepted.updated, 60);
+
+		const drained = await app.runtime.pollSession({
+			workerId: "pig-mac",
+			token: sessionToken,
+			cursor: 0,
+			waitMs: 0,
+		});
+		assert.equal(drained.commands.length, 0, "an accepted command leaves the pending set");
+
+		const state = await app.runtime.state();
+		assert.equal(state.dispatches.length, 50, "the board still lists only recent history");
+	} finally {
+		await app.runtime.shutdown();
+	}
+});

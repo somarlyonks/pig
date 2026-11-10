@@ -299,6 +299,7 @@ An operator console is an optional client that submits commands to workers and o
 
 - Dispatch is at least once. The console defines the dispatch key and keeps it stable across its own retries; the worker deduplicates by that key at admission, exactly like a repeated comment, so a duplicate dispatch reuses the original job.
 - Pending records on the console are delivery attempts, not a queue of record. Losing them loses no work, and re-dispatching the same key is always safe. There is still no second scheduler, lease, or ack-based reordering: the worker's own job chain serializes work.
+- A pending command is retained until the worker accepts or the console rejects it, independently of how much history the console keeps for display. A long-offline worker misses nothing that was never delivered.
 - An unknown outcome is resolved by looking up the dispatch key, never by resending blindly. A worker can always answer which job a key created.
 - The consumed cursor lives on the worker. The console does not track what a worker has already consumed, so a console that loses its state cannot replay a command into a second job.
 - A command carries a delivery deadline. The worker rejects an expired command at admission, because the console cannot recall a record from a worker that is offline.
