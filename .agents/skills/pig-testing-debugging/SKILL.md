@@ -32,6 +32,12 @@ Tests use `node --test` with Node type stripping. Import source with explicit `.
 - `test/durable-agent.test.ts` — model resolution, shell env, review path guard, durable agent answer.
 - `test/cloudflare.test.ts` — WebCrypto verification, repo extraction, alarm projection.
 - `test/server.test.ts` — HTTP/webhook/admin with a fake app.
+- `test/dispatch.test.ts` — console dispatch planning, capability catalog, envelope parsing.
+- `test/console.test.ts` — console runtime: enrollment, scoped dispatch, session polling, ack, observations.
+- `test/console-session.test.ts` — worker-side polling loop: cursor, ack, pause, backoff.
+- `test/console-assistant.test.ts` — proposal-only assistant with a faux model.
+- `test/worker-kit.test.ts` — the worker protocol for non-PiG agents.
+- `test/e2e.test.ts` — vertical slice over HTTP: console enroll → dispatch → PiG patch job → branch, draft PR, observation, reply.
 - `test/git.test.ts` — Git safety, workflow guard, askpass, commit.
 - `test/contract.test.ts`, `diff.test.ts`, `semver.test.ts`, `repo-config.test.ts`, `verify.test.ts` — pure helpers.
 
