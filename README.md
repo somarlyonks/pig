@@ -319,6 +319,23 @@ curl -sS -X POST "http://127.0.0.1:8080/api/dispatch" \
 - With an `anchor` and `anchorType`, `target` selects where the change lands: `new` (branch from the default branch), `head` (the pull request's own branch), or `patch` (a PiG-owned branch above the pull request head, opened as a draft pull request; the only target that works for a fork).
 - `pig.status` and `pig.cancel` are answered on the job record instead of GitHub. Read the answer from `GET /api/jobs/:id` in the `reply` field.
 
+## Verify a deployment
+
+Two commands answer "will the bot work on this repository?" before you rely on GitHub to deliver anything.
+
+```bash
+npm run doctor -- owner/name
+```
+
+`doctor` checks the App credentials, the declared and *granted* installation permissions (the usual failure is a missing `issues: write` or `pull_requests: write`), whether PiG is installed on that repository, that the repository is readable, whether `.pig.yml` exists, and that a model and webhook secret are configured. It exits non-zero on any failure.
+
+```bash
+npm run smoke -- owner/name 7            # posts a signed @pig status delivery
+npm run smoke -- owner/name 7 --work     # posts @pig fix and opens a pull request
+```
+
+`smoke` starts the server in-process and posts a **signed** `issue_comment` delivery to `/api/github/webhooks` — the same shape GitHub sends — then waits for the job. That exercises signature verification, planning, admission, authorization, the job task, and GitHub output without waiting for a real webhook delivery. Use the number of an existing issue or pull request; `--actor=<login>` defaults to the installation account.
+
 ## Operator console
 
 The console is an optional separate app: one Worker and one Durable Object with its own storage, a status board, and a command box. It is a client of the workers it registers and holds no GitHub credential. Deploy it apart from PiG:

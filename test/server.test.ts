@@ -79,6 +79,7 @@ function detail(): JobDetail {
 		events: ["admitted"],
 		progressCommentId: 12,
 		reply: null,
+		result: {},
 	};
 }
 

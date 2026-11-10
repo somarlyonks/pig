@@ -23,7 +23,9 @@
 		"runner:dist": "node --env-file-if-exists=.env dist/runner/main.js",
 		"console:dev": "wrangler dev -c wrangler.console.jsonc",
 		"console:deploy": "wrangler deploy -c wrangler.console.jsonc",
-		"console:dry-run": "wrangler deploy -c wrangler.console.jsonc --dry-run --outdir dist-console"
+		"console:dry-run": "wrangler deploy -c wrangler.console.jsonc --dry-run --outdir dist-console",
+		"doctor": "node --env-file-if-exists=.env src/doctor-cli.ts",
+		"smoke": "node --env-file-if-exists=.env src/smoke-cli.ts"
 	},
 	"keywords": [
 		"github-app",

@@ -71,6 +71,8 @@ export interface JobDetail {
 	events: string[];
 	progressCommentId: number | null;
 	reply: string | null;
+	/** The handler's structured result, available once the job completed. */
+	result: Record<string, unknown>;
 }
 
 export interface OrchestrationContext {

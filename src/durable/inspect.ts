@@ -121,6 +121,17 @@ export async function listJobsForRepo(
 	return jobs;
 }
 
+function taskResult(
+	record: TaskRecord<unknown, unknown, unknown>,
+): Record<string, unknown> {
+	if (record.state.status !== "terminal") return {};
+	if (record.state.outcome.status !== "completed") return {};
+	const result = record.state.outcome.result as { result?: unknown } | null | undefined;
+	return typeof result?.result === "object" && result.result !== null
+		? (result.result as Record<string, unknown>)
+		: {};
+}
+
 export async function getJobDetail(
 	harness: Harness,
 	taskName: string,
@@ -139,6 +150,7 @@ export async function getJobDetail(
 		events: doc?.events ?? [],
 		progressCommentId: doc?.progressCommentId ?? null,
 		reply: doc?.reply ?? null,
+		result: taskResult(record),
 	};
 }
 

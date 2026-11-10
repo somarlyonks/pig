@@ -38,6 +38,15 @@ Tests use `node --test` with Node type stripping. Import source with explicit `.
 - `test/console-assistant.test.ts` — proposal-only assistant with a faux model.
 - `test/worker-kit.test.ts` — the worker protocol for non-PiG agents.
 - `test/e2e.test.ts` — vertical slice over HTTP: console enroll → dispatch → PiG patch job → branch, draft PR, observation, reply.
+- `test/doctor.test.ts` — deployment preflight: credentials, granted permissions, installation, repo, model.
+- `test/smoke.test.ts` — synthetic signed delivery: payload planning, signature, real server round trip.
+
+Live checks that need real credentials (never in CI):
+
+```bash
+npm run doctor -- owner/name
+npm run smoke -- owner/name <issue-or-pr> [--work] [--actor=login]
+```
 - `test/git.test.ts` — Git safety, workflow guard, askpass, commit.
 - `test/contract.test.ts`, `diff.test.ts`, `semver.test.ts`, `repo-config.test.ts`, `verify.test.ts` — pure helpers.
 
