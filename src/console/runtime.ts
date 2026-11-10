@@ -10,7 +10,9 @@ import {
 import type { CapabilityDescriptor } from "../dispatch/capabilities.ts";
 import type { Logger } from "../logger.ts";
 import { createNoModels } from "../durable/no-models.ts";
+import type { Models } from "@earendil-works/pi-ai/models";
 import { validateParameters } from "../worker-kit/validate.ts";
+import { askAssistant, filterProposal, type AssistantAnswer } from "./assistant.ts";
 import { WorkerClient, WorkerRequestError, type WorkerJobState } from "./client.ts";
 import {
 	CounterDoc,
@@ -35,6 +37,8 @@ export interface ConsoleConfig {
 	dispatchDeadlineMs: number;
 	workerTimeoutMs: number;
 	logLevel: string;
+	model: string | null;
+	thinking: string | null;
 }
 
 const MAX_RECENT_DISPATCHES = 50;
@@ -112,6 +116,7 @@ export interface ConsoleRuntimeOptions {
 	config: ConsoleConfig;
 	logger: Logger;
 	fetch: typeof fetch;
+	models?: Models;
 	now?: () => number;
 	sleep?: (ms: number) => Promise<void>;
 	onWake?: (wake: Wake) => void;
@@ -154,6 +159,10 @@ export interface ConsoleRuntime {
 		confirm?: boolean;
 	}): Promise<{ status: number; body: Record<string, unknown> }>;
 	lookup(dispatchKey: string): Promise<StateDispatch | null>;
+	assist(input: {
+		message: string;
+		actor: string;
+	}): Promise<{ reply: string; proposals: (ConsoleProposal & { rationale: string })[] }>;
 	pollSession(input: {
 		workerId: string;
 		token: string;
@@ -776,6 +785,44 @@ export async function createConsoleRuntime(
 				if (doc) dispatches.push(toDispatchView(doc));
 			}
 			return { now: now(), workers, jobs, dispatches };
+		},
+
+		async assist(input) {
+			const state = await runtime.state();
+			const answer: AssistantAnswer = await askAssistant(
+				{
+					models: options.models ?? createNoModels(),
+					model: config.model,
+					thinking: config.thinking,
+					now,
+				},
+				{ message: input.message, actor: input.actor, state },
+			);
+			const proposals: (ConsoleProposal & { rationale: string })[] = [];
+			const dropped: string[] = [];
+			for (const draft of answer.proposals) {
+				const check = filterProposal(state, draft);
+				if (!check.ok) {
+					dropped.push(check.reason);
+					continue;
+				}
+				const proposed = await runtime.propose({
+					workerId: draft.workerId,
+					capability: draft.capability,
+					params: draft.params,
+					actor: input.actor,
+				});
+				if (!proposed.ok) {
+					dropped.push(proposed.error);
+					continue;
+				}
+				proposals.push({ ...proposed.proposal, rationale: draft.rationale });
+			}
+			const reply =
+				dropped.length === 0
+					? answer.reply
+					: `${answer.reply}\n\nDropped ${dropped.length} unusable proposal(s): ${dropped.join("; ")}`;
+			return { reply, proposals };
 		},
 
 		async pollSession(input) {

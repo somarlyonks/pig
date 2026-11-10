@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
+import { createModelRuntime } from "../../durable/models.ts";
 import { handleConsoleRequest, consoleServiceFromRuntime } from "../../console/http.ts";
 import { createConsoleRuntime, type ConsoleRuntime } from "../../console/runtime.ts";
 import { createConsoleLogger } from "../logger.ts";
@@ -20,6 +21,18 @@ export class ConsoleDurableObject extends DurableObject<ConsoleEnv> {
 
 	async #initialize(): Promise<void> {
 		const config = consoleConfig(this.env);
+		for (const key of [
+			"ANTHROPIC_API_KEY",
+			"OPENAI_API_KEY",
+			"DEEPSEEK_API_KEY",
+			"GEMINI_API_KEY",
+			"OPENROUTER_API_KEY",
+		]) {
+			const value = (this.env as unknown as Record<string, unknown>)[key];
+			if (typeof value === "string" && value !== "") {
+				process.env[key] = value;
+			}
+		}
 		const storage = await openDurableObjectSqliteStorage(
 			this.ctx.storage,
 			config.tablePrefix === "" ? {} : { prefix: config.tablePrefix },
@@ -27,6 +40,7 @@ export class ConsoleDurableObject extends DurableObject<ConsoleEnv> {
 		this.#runtime = await createConsoleRuntime({
 			storage,
 			config,
+			models: createModelRuntime(),
 			logger: createConsoleLogger("info"),
 			fetch: (input, init) => fetch(input, init),
 		});

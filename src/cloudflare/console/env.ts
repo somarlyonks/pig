@@ -8,6 +8,13 @@ export interface ConsoleEnv {
 	PIG_CONSOLE_ENROLLMENT_TTL_MINUTES?: string;
 	PIG_CONSOLE_OBSERVATION_SECONDS?: string;
 	PIG_CONSOLE_DISPATCH_DEADLINE_MINUTES?: string;
+	PIG_CONSOLE_MODEL?: string;
+	PIG_CONSOLE_THINKING?: string;
+	ANTHROPIC_API_KEY?: string;
+	OPENAI_API_KEY?: string;
+	DEEPSEEK_API_KEY?: string;
+	GEMINI_API_KEY?: string;
+	OPENROUTER_API_KEY?: string;
 }
 
 function positiveMinutes(value: string | undefined, fallback: number): number {
@@ -28,5 +35,7 @@ export function consoleConfig(env: ConsoleEnv): ConsoleConfig {
 		dispatchDeadlineMs: positiveMinutes(env.PIG_CONSOLE_DISPATCH_DEADLINE_MINUTES, 24 * 60 * 60_000),
 		workerTimeoutMs: 20_000,
 		logLevel: "info",
+		model: env.PIG_CONSOLE_MODEL?.trim() || null,
+		thinking: env.PIG_CONSOLE_THINKING?.trim() || null,
 	};
 }

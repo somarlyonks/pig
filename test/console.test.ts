@@ -32,6 +32,8 @@ function config(): ConsoleConfig {
 		dispatchDeadlineMs: 24 * 60 * 60_000,
 		workerTimeoutMs: 5_000,
 		logLevel: "error",
+		model: null,
+		thinking: null,
 	};
 }
 

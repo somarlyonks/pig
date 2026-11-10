@@ -327,7 +327,8 @@ An operator console is an optional client that submits commands to workers and o
 - A worker's repository set is what it declared plus what the console observed, because the Cloudflare host cannot enumerate its own repositories. The console shows "never observed" differently from "observed and idle".
 - An outbound worker is never dialled. It pushes its own observations on each session, and the console records them with the time they were reported.
 - A console that loses its observations loses no work and no authoritative state; it rebuilds by reading workers again.
-- Console v1 is a status board plus a command box. A natural-language layer may sit above them later, but neither depends on one, and every dispatched command is a structured proposal with its target, write target, and parameters shown and confirmed before it is sent.
+- Console v1 is a status board plus a command box. A natural-language layer may sit above them, but neither depends on one, and every dispatched command is a structured proposal with its target, write target, and parameters shown and confirmed before it is sent.
+- A natural-language layer only produces proposals. It has no dispatch capability, it drops proposals the worker would reject, and the operator confirms before anything is sent.
 
 ## 10. Limits and non-goals (v1)
 

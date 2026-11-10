@@ -325,6 +325,9 @@ The console is an optional separate app: one Worker and one Durable Object with 
 
 ```bash
 npx wrangler secret put PIG_CONSOLE_TOKEN -c wrangler.console.jsonc
+# optional, enables the "Ask" box
+npx wrangler secret put PIG_CONSOLE_MODEL -c wrangler.console.jsonc    # e.g. anthropic/claude-sonnet-4-5
+npx wrangler secret put ANTHROPIC_API_KEY -c wrangler.console.jsonc
 npm run console:deploy          # or: npm run console:dev for a local board
 ```
 
@@ -348,6 +351,7 @@ The console asks the worker for `GET /api/capabilities`, so capabilities come fr
 - The console stores each worker's API token because it must call that worker. Give every worker its own token and keep the console isolated.
 - A worker behind NAT registers as `outbound`. It declares its own capabilities, receives commands by long-polling the console, and pushes its observations back, so the console never dials it.
 - A dangerous capability (`pig.release`, `pig.cancel`) always needs a confirmation from the board before it is sent.
+- "Ask" is optional. With `PIG_CONSOLE_MODEL` and provider credentials set on the console Worker, a request is turned into validated proposals; without them the board and the command box keep working and Ask answers `503`. The assistant never dispatches: every proposal still needs a person's confirmation.
 - The board shows observed jobs only. "Never observed" and "observed and idle" are different states; the console cannot enumerate a Cloudflare host's repositories.
 
 A worker behind NAT registers as an outbound session instead:

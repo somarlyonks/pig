@@ -63,6 +63,13 @@ pre.out { white-space: pre-wrap; word-break: break-word; margin: 0; }
   </div>
   <div>
     <section>
+      <h2>Ask</h2>
+      <div class="field"><label>Message</label><textarea id="ask" style="min-height:70px"></textarea></div>
+      <button id="askbtn" class="primary">Ask</button>
+      <pre id="answer" class="out muted" style="margin-top:10px"></pre>
+      <div id="proposals"></div>
+    </section>
+    <section>
       <h2>Command</h2>
       <div class="field"><label>Worker</label><select id="worker"></select></div>
       <div class="field"><label>Capability</label><select id="capability"></select></div>
@@ -286,6 +293,51 @@ async function enroll() {
   $("enrollment").textContent = result.status + "\\n" + JSON.stringify(result.body, null, 2);
 }
 
+async function ask() {
+  $("answer").textContent = "thinking…";
+  $("proposals").innerHTML = "";
+  const result = await api("/api/assistant", {
+    method: "POST",
+    body: JSON.stringify({ message: $("ask").value, actor: $("actor").value }),
+  });
+  if (result.status !== 200) {
+    $("answer").textContent = result.status + " " + (result.body.error || "");
+    return;
+  }
+  $("answer").textContent = result.body.reply || "";
+  for (const proposal of result.body.proposals || []) {
+    const block = document.createElement("div");
+    block.style.marginTop = "8px";
+    const text = document.createElement("div");
+    text.className = "muted";
+    text.textContent =
+      proposal.rationale + " — " + proposal.workerId + " · " + proposal.capability +
+      " · " + JSON.stringify(proposal.params);
+    const button = document.createElement("button");
+    button.textContent = proposal.dangerous ? "Confirm and send" : "Send";
+    button.onclick = async () => {
+      button.disabled = true;
+      const sent = await api("/api/commands", {
+        method: "POST",
+        body: JSON.stringify({
+          workerId: proposal.workerId,
+          capability: proposal.capability,
+          actor: proposal.actor,
+          params: proposal.params,
+          proposalId: proposal.proposalId,
+          confirm: true,
+        }),
+      });
+      text.textContent = sent.status + " " + JSON.stringify(sent.body);
+      load(true);
+    };
+    block.appendChild(text);
+    block.appendChild(button);
+    $("proposals").appendChild(block);
+  }
+}
+
+$("askbtn").onclick = ask;
 $("refresh").onclick = () => load(true);
 $("propose").onclick = propose;
 $("send").onclick = send;

@@ -1,10 +1,12 @@
 import type {
+	ConsoleProposal,
 	ConsoleState,
 	ConsoleRuntime,
 	SessionCommand,
 	StateDispatch,
 	WorkerView,
 } from "./runtime.ts";
+import { AssistantUnavailableError } from "./assistant.ts";
 import { WorkerRequestError } from "./client.ts";
 
 export interface ConsoleService {
@@ -32,6 +34,10 @@ export interface ConsoleService {
 		confirm?: boolean;
 	}): Promise<{ status: number; body: Record<string, unknown> }>;
 	lookup(dispatchKey: string): Promise<StateDispatch | null>;
+	assist(input: {
+		message: string;
+		actor: string;
+	}): Promise<{ reply: string; proposals: (ConsoleProposal & { rationale: string })[] }>;
 	pollSession(input: {
 		workerId: string;
 		token: string;
@@ -64,6 +70,7 @@ export function consoleServiceFromRuntime(runtime: ConsoleRuntime): ConsoleServi
 		listWorkers: () => runtime.listWorkers(),
 		submit: (input) => runtime.submit(input),
 		lookup: (key) => runtime.lookup(key),
+		assist: (input) => runtime.assist(input),
 		pollSession: (input) => runtime.pollSession(input),
 		ackSession: (input) => runtime.ackSession(input),
 		reportSession: (input) => runtime.reportSession(input),
@@ -239,6 +246,26 @@ export async function handleConsoleRequest(
 				...(body.confirm === true ? { confirm: true } : {}),
 			});
 			return json(result.body, result.status);
+		}
+
+		if (request.method === "POST" && url.pathname === "/api/assistant") {
+			if (!isAdmin(request, adminToken)) {
+				return json({ error: "not found" }, adminToken ? 401 : 404);
+			}
+			const body = await readJson(request);
+			const message = body ? readString(body, "message") : null;
+			const actor = body ? readString(body, "actor") : null;
+			if (!message || !actor) {
+				return json({ error: "message and actor are required" }, 400);
+			}
+			try {
+				return json(await service.assist({ message, actor }));
+			} catch (error) {
+				if (error instanceof AssistantUnavailableError) {
+					return json({ error: error.message }, 503);
+				}
+				throw error;
+			}
 		}
 
 		if (request.method === "GET" && url.pathname === "/api/session/commands") {
