@@ -46,6 +46,7 @@ function summary(): JobSummary {
 	return {
 		id: "7",
 		kind: "work",
+		origin: "github",
 		status: "queued",
 		attempts: 1,
 		maxAttempts: 2,
@@ -63,6 +64,7 @@ function detail(): JobDetail {
 			kind: "control",
 			action: "help",
 			message: null,
+			origin: "github",
 			actor: "alice",
 			source: { type: "issue", number: 7, title: null },
 			trigger: {
@@ -75,6 +77,7 @@ function detail(): JobDetail {
 		},
 		events: ["admitted"],
 		progressCommentId: 12,
+		reply: null,
 	};
 }
 
@@ -86,8 +89,10 @@ function fakeApp(overrides: Partial<PigApp> = {}): PigApp {
 			status: 202,
 			body: { ok: true, jobId: "7", event: input.event },
 		}),
+		dispatch: async () => ({ status: 202, body: { ok: true, jobId: "7" } }),
 		listJobs: async () => [summary()],
 		getJob: async (id) => (id === "7" ? detail() : null),
+		getJobByCommandKey: async (key) => (key === "dispatch:k1" ? detail() : null),
 		activeJobs: async () => 0,
 		closed: new Promise(() => {}),
 		shutdown: async () => {},
@@ -260,6 +265,88 @@ test("rejects unknown routes and non-POST webhook requests", async () => {
 	try {
 		assert.equal((await fetch(`${baseUrl}/nope`)).status, 404);
 		assert.equal((await fetch(`${baseUrl}/api/github/webhooks`)).status, 405);
+	} finally {
+		await running.close();
+	}
+});
+
+test("serves capabilities and dispatch to the admin token only", async () => {
+	const seen: unknown[] = [];
+	const app = fakeApp({
+		dispatch: async (input) => {
+			seen.push(input);
+			return { status: 202, body: { ok: true, jobId: "7" } };
+		},
+	});
+	const { running, baseUrl } = await startApp(app);
+	try {
+		const unauthorized = await fetch(`${baseUrl}/api/capabilities`);
+		assert.equal(unauthorized.status, 401);
+
+		const capabilities = await fetch(`${baseUrl}/api/capabilities`, {
+			headers: { authorization: "Bearer admin-token" },
+		});
+		assert.equal(capabilities.status, 200);
+		const listed = (await capabilities.json()) as {
+			worker: { name: string };
+			capabilities: { name: string }[];
+		};
+		assert.equal(listed.worker.name, "PiG");
+		assert.ok(listed.capabilities.some((entry) => entry.name === "pig.work"));
+
+		const invalid = await fetch(`${baseUrl}/api/dispatch`, {
+			method: "POST",
+			headers: {
+				authorization: "Bearer admin-token",
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({ capability: "pig.status" }),
+		});
+		assert.equal(invalid.status, 400);
+
+		const dispatched = await fetch(`${baseUrl}/api/dispatch`, {
+			method: "POST",
+			headers: {
+				authorization: "Bearer admin-token",
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({
+				capability: "pig.work",
+				params: { repo: "acme/app", instructions: "Add a test" },
+				dispatchKey: "console-1",
+				actor: "alice",
+			}),
+		});
+		assert.equal(dispatched.status, 202);
+		assert.equal(seen.length, 1);
+		const input = seen[0] as { capability: string; dispatchKey: string };
+		assert.equal(input.capability, "pig.work");
+		assert.equal(input.dispatchKey, "console-1");
+	} finally {
+		await running.close();
+	}
+});
+
+test("looks up a job by dispatch key", async () => {
+	const app = fakeApp();
+	const { running, baseUrl } = await startApp(app);
+	try {
+		const found = await fetch(`${baseUrl}/api/jobs?dispatchKey=k1`, {
+			headers: { authorization: "Bearer admin-token" },
+		});
+		assert.equal(found.status, 200);
+		const detail = (await found.json()) as { job: { id: string } };
+		assert.equal(detail.job.id, "7");
+
+		const missing = await fetch(`${baseUrl}/api/jobs?dispatchKey=other`, {
+			headers: { authorization: "Bearer admin-token" },
+		});
+		assert.equal(missing.status, 404);
+
+		const invalid = await fetch(`${baseUrl}/api/jobs?dispatchKey=bad%20key`, {
+			headers: { authorization: "Bearer admin-token" },
+		});
+		assert.equal(invalid.status, 400);
 	} finally {
 		await running.close();
 	}

@@ -145,7 +145,10 @@ function buildContext(
 			}, context);
 			jobContext.checkpoint = value;
 		},
-		updateProgress: (text) => progress.update(text),
+		updateProgress: async (text) => {
+			await progress.update(text);
+		},
+		setProgressAnchor: (issueNumber) => progress.setIssueNumber(issueNumber),
 		cancelRepositoryJobs: () => deps.cancelRepoJobs(input.repo, task.id),
 		listJobs: (limit) => deps.listJobs(input.repo, limit),
 		addEvent: async (level, message) => {

@@ -5,7 +5,7 @@ import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { RepositoryInfo } from "../github/repo.ts";
 import type { Logger } from "../logger.ts";
 import type { RepoConfig } from "../repo-config.ts";
-import type { JobKind, JobRequest } from "./types.ts";
+import type { JobKind, JobOrigin, JobRequest } from "./types.ts";
 
 export interface JobInfo {
 	id: string;
@@ -55,6 +55,7 @@ export type JobSummaryStatus =
 export interface JobSummary {
 	id: string;
 	kind: JobKind;
+	origin: JobOrigin;
 	status: JobSummaryStatus;
 	attempts: number;
 	maxAttempts: number;
@@ -69,6 +70,7 @@ export interface JobDetail {
 	request: JobRequest;
 	events: string[];
 	progressCommentId: number | null;
+	reply: string | null;
 }
 
 export interface OrchestrationContext {
@@ -84,6 +86,7 @@ export interface OrchestrationContext {
 	checkpoint: unknown;
 	setCheckpoint(value: unknown): Promise<void>;
 	updateProgress(text: string): Promise<void>;
+	setProgressAnchor(issueNumber: number): void;
 	cancelRepositoryJobs(): Promise<{ cancelled: number; running: number }>;
 	listJobs(limit: number): Promise<JobSummary[]>;
 	addEvent(level: string, message: string): Promise<void>;

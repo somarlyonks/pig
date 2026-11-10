@@ -62,7 +62,13 @@ interface FakeState {
 	configYaml: string | null;
 	repoFailure: number | null;
 	issueState: string;
-	pullRequests: { head: string; base: string; title: string; body: string }[];
+	pullRequests: {
+		head: string;
+		base: string;
+		title: string;
+		body: string;
+		draft?: boolean;
+	}[];
 	pullRequest: {
 		number: number;
 		title: string;
@@ -70,9 +76,11 @@ interface FakeState {
 		state: string;
 		merged: boolean;
 		user: { login: string };
-		head: { sha: string; ref: string };
+		head: { sha: string; ref: string; repo?: { full_name: string } };
 		base: { ref: string };
 	};
+	createdIssues: { number: number; title: string; body: string }[];
+	commentIssues: Map<number, number>;
 	diff: string;
 	files: { filename: string; status: string; additions: number; deletions: number }[];
 	reviews: {
@@ -183,19 +191,48 @@ function fakeOctokit(state: FakeState): Octokit {
 			},
 		},
 		issues: {
-			get: async () => ({
-				data: {
-					number: 7,
-					title: "An issue",
-					body: "Please add a file.",
-					state: state.issueState,
-					user: { login: "alice" },
-				},
+			get: async (parameters: { issue_number: number }) => {
+				const created = state.createdIssues.find(
+					(issue) => issue.number === parameters.issue_number,
+				);
+				return {
+					data: created
+						? {
+								number: created.number,
+								title: created.title,
+								body: created.body,
+								state: "open",
+								user: { login: "pig[bot]" },
+							}
+						: {
+								number: 7,
+								title: "An issue",
+								body: "Please add a file.",
+								state: state.issueState,
+								user: { login: "alice" },
+							},
+				};
+			},
+			create: async (parameters: { title: string; body: string }) => {
+				const number = 70 + state.createdIssues.length;
+				state.createdIssues.push({
+					number,
+					title: parameters.title,
+					body: parameters.body,
+				});
+				return { data: { number } };
+			},
+			listForRepo: async () => ({
+				data: state.createdIssues.map((issue) => ({
+					number: issue.number,
+					body: issue.body,
+				})),
 			}),
 			listComments: async () => ({ data: [] }),
-			createComment: async (parameters: { body: string }) => {
+			createComment: async (parameters: { body: string; issue_number: number }) => {
 				const id = state.nextCommentId++;
 				state.comments.set(id, parameters.body);
+				state.commentIssues.set(id, parameters.issue_number);
 				return { data: { id } };
 			},
 			updateComment: async (parameters: { comment_id: number; body: string }) => {
@@ -208,7 +245,13 @@ function fakeOctokit(state: FakeState): Octokit {
 				data: parameters.page === 1 || parameters.page === undefined ? state.pulls : [],
 			}),
 			get: async () => ({ data: state.pullRequest }),
-			create: async (parameters: { head: string; base: string; title: string; body: string }) => {
+			create: async (parameters: {
+				head: string;
+				base: string;
+				title: string;
+				body: string;
+				draft?: boolean;
+			}) => {
 				state.pullRequests.push(parameters);
 				return {
 					data: {
@@ -338,6 +381,8 @@ async function setup(options: HarnessOptions = {}): Promise<TestHarness> {
 		release: null,
 		createdRefs: [],
 		createdReleases: [],
+		createdIssues: [],
+		commentIssues: new Map(),
 	};
 	const logger = silentLogger();
 	const config = baseConfig(workspaceRoot);
@@ -450,6 +495,8 @@ async function waitForTaskState(
 function workRequest(instructions = "Add a file"): JobRequest {
 	return {
 		kind: "work",
+		target: "new",
+		origin: "github",
 		instructions,
 		actor: "alice",
 		source: { type: "issue", number: 7, title: "An issue" },
@@ -468,6 +515,7 @@ function helpRequest(actor = "alice"): JobRequest {
 		kind: "control",
 		action: "help",
 		message: null,
+		origin: "github",
 		actor,
 		source: { type: "issue", number: 7, title: "An issue" },
 		trigger: {
@@ -644,6 +692,7 @@ function reviewRequest(): JobRequest {
 		auto: false,
 		headSha: null,
 		focus: null,
+		origin: "github",
 		actor: "alice",
 		source: { type: "pull_request", number: 5, title: "Add app" },
 		trigger: {
@@ -754,6 +803,7 @@ function releaseRequest(
 		version,
 		draft: null,
 		prerelease: null,
+		origin: "github",
 		actor: "alice",
 		source: { type: "issue", number: 7, title: "An issue" },
 		trigger: {
@@ -804,6 +854,205 @@ test("creates a release and reports an existing one", async () => {
 		assert.equal(secondRecord.state.outcome.status, "completed");
 		assert.equal(app.state.createdReleases.length, 1);
 		assert.match([...app.state.comments.values()].join("\n"), /already exists/);
+	} finally {
+		await app.close();
+	}
+});
+
+async function prepareRemote(root: string, withFeatureBranch: boolean): Promise<{
+	bare: string;
+	headSha: string;
+}> {
+	const work = join(root, "work");
+	mkdirSync(work, { recursive: true });
+	await runGit(["init", "-q", "-b", "main"], { cwd: work });
+	writeFileSync(join(work, "README.md"), "initial\n");
+	await runGit(["add", "."], { cwd: work });
+	await runGit(
+		["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "initial"],
+		{ cwd: work },
+	);
+	let headSha = (await runGit(["rev-parse", "HEAD"], { cwd: work })).stdout.trim();
+	if (withFeatureBranch) {
+		await runGit(["checkout", "-q", "-b", "feature"], { cwd: work });
+		writeFileSync(join(work, "feature.txt"), "feature\n");
+		await runGit(["add", "."], { cwd: work });
+		await runGit(
+			["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "feature"],
+			{ cwd: work },
+		);
+		headSha = (await runGit(["rev-parse", "HEAD"], { cwd: work })).stdout.trim();
+	}
+	const bare = join(root, "bare.git");
+	await runGit(["clone", "-q", "--bare", work, bare], { cwd: root });
+	if (withFeatureBranch) {
+		await runGit(["update-ref", "refs/pull/5/head", headSha], { cwd: bare });
+	}
+	return { bare, headSha };
+}
+
+function patchRequest(): JobRequest {
+	return {
+		kind: "work",
+		origin: "console",
+		target: "patch",
+		instructions: "Add a patch file",
+		actor: "alice",
+		source: { type: "pull_request", number: 5, title: "Add app" },
+		trigger: {
+			commentId: null,
+			commentBody: null,
+			commentAuthor: null,
+			reviewComment: null,
+		},
+		receivedAt: Date.now(),
+	};
+}
+
+function generatedRequest(): JobRequest {
+	return {
+		kind: "work",
+		origin: "console",
+		target: "new",
+		instructions: "Add a generated file",
+		actor: "alice",
+		source: { type: "generated", number: null, title: "Console request" },
+		trigger: {
+			commentId: null,
+			commentBody: null,
+			commentAuthor: null,
+			reviewComment: null,
+		},
+		receivedAt: Date.now(),
+	};
+}
+
+function completedResult(record: NonNullable<Awaited<ReturnType<Harness["getTask"]>>>) {
+	const outcome = record.state.outcome;
+	assert.equal(outcome?.status, "completed");
+	return outcome?.status === "completed"
+		? (outcome.result as unknown as { result: Record<string, unknown> })
+		: { result: {} };
+}
+
+test("opens a draft patch pull request above the anchored pull request", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pig-patch-"));
+	const { bare, headSha } = await prepareRemote(root, true);
+	const app = await setup({
+		remoteUrl: bare,
+		responses: [
+			fauxAssistantMessage(
+				fauxToolCall("write", { path: "patch.txt", content: "patch\n" }),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("Added patch.txt"),
+		],
+	});
+	app.state.pullRequest.head = { sha: headSha, ref: "feature", repo: { full_name: "acme/app" } };
+	try {
+		const id = await app.run(patchRequest());
+		const result = completedResult(await app.harness.waitForTask(id, BACKGROUND_CONTEXT));
+		const branch = String(result.result.branch);
+		assert.match(branch, /^pig\/5-patch-/);
+
+		const refs = await runGit(["ls-remote", bare], { cwd: root });
+		assert.match(refs.stdout, new RegExp(`refs/heads/${branch}`));
+		assert.equal(app.state.pullRequests.length, 1);
+		assert.equal(app.state.pullRequests[0]?.base, "feature");
+		assert.equal(app.state.pullRequests[0]?.draft, true);
+		assert.match(app.state.pullRequests[0]?.body ?? "", /Patch for #5/);
+	} finally {
+		await app.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("rejects the head target for a fork pull request", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pig-fork-"));
+	const { bare, headSha } = await prepareRemote(root, true);
+	const app = await setup({ remoteUrl: bare });
+	app.state.pullRequest.head = {
+		sha: headSha,
+		ref: "feature",
+		repo: { full_name: "someone/app" },
+	};
+	try {
+		const request = patchRequest();
+		const id = await app.run({
+			...(request as Extract<JobRequest, { kind: "work" }>),
+			target: "head",
+		});
+		const record = await app.harness.waitForTask(id, BACKGROUND_CONTEXT);
+		assert.equal(record.state.outcome.status, "failed");
+		assert.match(
+			record.state.outcome.status === "failed" ? record.state.outcome.error.message : "",
+			/fork/,
+		);
+	} finally {
+		await app.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("creates an anchor issue for a console work command without one", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pig-anchor-"));
+	const { bare } = await prepareRemote(root, false);
+	const app = await setup({
+		remoteUrl: bare,
+		responses: [
+			fauxAssistantMessage(
+				fauxToolCall("write", { path: "generated.txt", content: "generated\n" }),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("Added generated.txt"),
+		],
+	});
+	try {
+		const id = await app.run(generatedRequest());
+		const result = completedResult(await app.harness.waitForTask(id, BACKGROUND_CONTEXT));
+
+		assert.equal(app.state.createdIssues.length, 1);
+		const anchor = app.state.createdIssues[0];
+		assert.equal(anchor?.title, "Console request");
+		assert.match(anchor?.body ?? "", /pig-anchor-/);
+		assert.match(anchor?.body ?? "", /Requested by @alice/);
+
+		assert.match(String(result.result.branch), /^pig\/70-/);
+		assert.equal(app.state.pullRequests[0]?.head, String(result.result.branch));
+		assert.equal(app.state.pullRequests[0]?.base, "main");
+		assert.match(app.state.pullRequests[0]?.body ?? "", /Closes #70/);
+
+		const comments = [...app.state.commentIssues.entries()];
+		assert.ok(comments.some(([, issueNumber]) => issueNumber === 70));
+	} finally {
+		await app.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("answers a console status command on the job instead of GitHub", async () => {
+	const app = await setup();
+	try {
+		const id = await app.run({
+			kind: "control",
+			action: "status",
+			message: null,
+			origin: "console",
+			actor: "alice",
+			source: { type: "repository", number: null, title: null },
+			trigger: {
+				commentId: null,
+				commentBody: null,
+				commentAuthor: null,
+				reviewComment: null,
+			},
+			receivedAt: Date.now(),
+		});
+		const record = await app.harness.waitForTask(id, BACKGROUND_CONTEXT);
+		assert.equal(record.state.outcome?.status, "completed");
+		const doc = await app.harness.snapshot(JobDoc, String(id), BACKGROUND_CONTEXT);
+		assert.match(doc?.reply ?? "", /PiG status/);
+		assert.equal(app.state.comments.size, 0);
 	} finally {
 		await app.close();
 	}

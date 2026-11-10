@@ -8,16 +8,31 @@ import {
 	type Wake,
 } from "@earendil-works/pi-durable";
 import type { AppConfig } from "../config.ts";
+import type { AdmissionPlan } from "../webhooks/plan.ts";
 import type { GitHubClients } from "../github/app.ts";
 import { RepoConfigLoader } from "../github/repo-config.ts";
 import type { JobDetail, JobSummary } from "../jobs/context.ts";
 import type { Logger } from "../logger.ts";
-import { admissionNotice, admitWebhook, type WebhookInput, type WebhookResult } from "./admission.ts";
+import { dispatchCommand } from "../dispatch/admit.ts";
+import {
+	admissionNotice,
+	admitWebhook,
+	type AdmissionDecision,
+	type WebhookInput,
+	type WebhookResult,
+} from "./admission.ts";
 import { nextAlarmForTasks } from "./alarm.ts";
-import { countActiveJobs, cancelJobsForRepo, getJobDetail, listJobsForRepo } from "./inspect.ts";
+import {
+	countActiveJobs,
+	cancelJobsForRepo,
+	findJobByCommandKey,
+	getJobDetail,
+	listJobsForRepo,
+} from "./inspect.ts";
 import { createNoModels } from "./no-models.ts";
 import { createOrchestrationTask } from "./orchestration-task.ts";
 import { ORCHESTRATION_TASK_NAME } from "./task-types.ts";
+import type { DispatchPlanInput } from "../dispatch/plan.ts";
 
 const UNSUPPORTED_CODING_MESSAGE =
 	"This PiG deployment runs control and release jobs only. Work and review commands need the Node host or a configured coding execution backend.";
@@ -40,8 +55,10 @@ export interface OrchestrationRuntime {
 	config: AppConfig;
 	harness: Harness;
 	admit(input: WebhookInput): Promise<WebhookResult>;
+	dispatch(input: DispatchPlanInput): Promise<WebhookResult>;
 	listJobs(repo: string, limit: number): Promise<JobSummary[]>;
 	getJob(id: string, repo?: string): Promise<JobDetail | null>;
+	getJobByCommandKey(idempotencyKey: string): Promise<JobDetail | null>;
 	activeJobs(): Promise<number>;
 	nextAlarm(now?: number): Promise<number | undefined>;
 	wake(): Wake;
@@ -92,37 +109,31 @@ export async function createOrchestrationRuntime(
 	registry.install({ name: "pig.orchestration", tasks: [task] });
 	harness.resume();
 
+	const constrainAdmission = (admission: AdmissionPlan): AdmissionDecision => {
+		const kind = admission.jobKind;
+		if (kind === "control" || kind === "release") return admission;
+		if (admission.request.kind === "review" && admission.request.auto) {
+			return { kind: "ignore", reason: "coding jobs are not supported on this host" };
+		}
+		return admissionNotice(admission, UNSUPPORTED_CODING_MESSAGE);
+	};
+	const deps = {
+		harness,
+		rootId: root.id,
+		appSlug: config.appSlug,
+		logger,
+		task,
+		filterAdmission: constrainAdmission,
+	};
 	const runtime: OrchestrationRuntime = {
 		config,
 		harness,
-		admit: (input) =>
-			admitWebhook(
-				{
-					harness,
-					rootId: root.id,
-					appSlug: config.appSlug,
-					logger,
-					task,
-					filterPlan: (plan) => {
-						if (plan.kind !== "admit") return plan;
-						const kind = plan.admission.jobKind;
-						if (kind === "control" || kind === "release") return plan;
-						if (plan.admission.request.kind === "review" && plan.admission.request.auto) {
-							return {
-								kind: "ignore",
-								reason: "coding jobs are not supported on this host",
-							};
-						}
-						return {
-							kind: "admit",
-							admission: admissionNotice(plan.admission, UNSUPPORTED_CODING_MESSAGE),
-						};
-					},
-				},
-				input,
-			),
+		admit: (input) => admitWebhook(deps, input),
+		dispatch: (input) => dispatchCommand({ app: options.clients.app, input, deps }),
 		listJobs: (repo, limit) =>
 			listJobsForRepo(harness, ORCHESTRATION_TASK_NAME, repo, limit),
+		getJobByCommandKey: (key) =>
+			findJobByCommandKey(harness, ORCHESTRATION_TASK_NAME, key),
 		getJob: async (id, repo) => {
 			const detail = await getJobDetail(harness, ORCHESTRATION_TASK_NAME, id);
 			if (!detail) return null;

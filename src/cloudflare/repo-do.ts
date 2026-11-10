@@ -10,6 +10,7 @@ import {
 	createOrchestrationRuntime,
 	type DurableRuntime,
 } from "../durable/orchestration-runtime.ts";
+import { dispatchIdempotencyKey, type DispatchPlanInput } from "../dispatch/plan.ts";
 import { RemoteRunnerClient } from "../durable/remote-runner.ts";
 import { cloudflareConfig } from "./config.ts";
 import type { CloudflareEnv } from "./env.ts";
@@ -146,6 +147,21 @@ export class RepoDurableObject extends DurableObject<CloudflareEnv> {
 				};
 				const result = await runtime.admit(input);
 				return Response.json(result.body, { status: result.status });
+			}
+			if (request.method === "POST" && url.pathname === "/dispatch") {
+				const input = (await request.json()) as DispatchPlanInput;
+				const result = await runtime.dispatch(input);
+				return Response.json(result.body, { status: result.status });
+			}
+			if (request.method === "GET" && url.pathname === "/job-key") {
+				const key = url.searchParams.get("key");
+				if (!key) {
+					return Response.json({ error: "key is required" }, { status: 400 });
+				}
+				const detail = await runtime.getJobByCommandKey(dispatchIdempotencyKey(key));
+				return detail
+					? Response.json(detail)
+					: Response.json({ error: "job not found" }, { status: 404 });
 			}
 			if (request.method === "GET" && url.pathname === "/jobs") {
 				const repo = url.searchParams.get("repo");

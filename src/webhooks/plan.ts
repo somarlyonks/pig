@@ -1,4 +1,10 @@
-import type { JobKind, JobRequest, JobSource, TriggerContext } from "../jobs/types.ts";
+import type {
+	IssueAnchor,
+	JobKind,
+	JobRequest,
+	PullRequestAnchor,
+	TriggerContext,
+} from "../jobs/types.ts";
 import { parseMentionCommand, type ParsedCommand } from "./commands.ts";
 
 export interface AdmissionPlan {
@@ -23,7 +29,7 @@ interface RepositoryWebhook {
 interface CommandJobInput {
 	repo: RepositoryWebhook;
 	actor: string;
-	source: JobSource;
+	source: IssueAnchor | PullRequestAnchor;
 	trigger: TriggerContext;
 	command: ParsedCommand;
 	keyPrefix: string;
@@ -73,6 +79,7 @@ function controlAdmission(
 		kind: "control",
 		action,
 		message,
+		origin: "github",
 		actor: input.actor,
 		source: input.source,
 		trigger: input.trigger,
@@ -93,8 +100,8 @@ function buildCommentAdmission(input: CommandJobInput): AdmissionPlan {
 	const command = input.command;
 	const key = `${input.keyPrefix}:${command.kind === "invalid" ? "notice" : command.kind}`;
 	const base = {
+		origin: "github" as const,
 		actor: input.actor,
-		source: input.source,
 		trigger: input.trigger,
 		receivedAt: input.now,
 	};
@@ -126,7 +133,14 @@ function buildCommentAdmission(input: CommandJobInput): AdmissionPlan {
 			}
 			return admit(
 				"review",
-				{ kind: "review", auto: false, headSha: null, focus: command.focus, ...base },
+				{
+					kind: "review",
+					auto: false,
+					headSha: null,
+					focus: command.focus,
+					source: input.source,
+					...base,
+				},
 				2,
 			);
 		}
@@ -139,12 +153,23 @@ function buildCommentAdmission(input: CommandJobInput): AdmissionPlan {
 					version: command.version,
 					draft: command.draft,
 					prerelease: command.prerelease,
+					source: input.source,
 					...base,
 				},
 				2,
 			);
 		case "work":
-			return admit("work", { kind: "work", instructions: command.instructions, ...base }, 2);
+			return admit(
+				"work",
+				{
+					kind: "work",
+					target: input.source.type === "pull_request" ? "head" : "new",
+					instructions: command.instructions,
+					source: input.source,
+					...base,
+				},
+				2,
+			);
 		case "invalid":
 			return controlAdmission(input, "notice", command.message);
 	}
@@ -178,11 +203,9 @@ function handleIssueComment(
 	const command = parseMentionCommand(body, appSlug);
 	if (!command) return { kind: "ignore", reason: "no mention" };
 
-	const source: JobSource = {
-		type: asRecord(issue.pull_request) ? "pull_request" : "issue",
-		number: issueNumber,
-		title: asString(issue.title),
-	};
+	const source: IssueAnchor | PullRequestAnchor = asRecord(issue.pull_request)
+		? { type: "pull_request", number: issueNumber, title: asString(issue.title) }
+		: { type: "issue", number: issueNumber, title: asString(issue.title) };
 	const trigger: TriggerContext = {
 		commentId,
 		commentBody: body,
@@ -298,6 +321,7 @@ function handlePullRequest(
 		auto: true,
 		headSha,
 		focus: null,
+		origin: "github",
 		actor: login,
 		source: {
 			type: "pull_request",

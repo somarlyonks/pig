@@ -1,4 +1,7 @@
 import type { ExportedHandler } from "@cloudflare/workers-types";
+import { PIG_CAPABILITIES } from "../dispatch/capabilities.ts";
+import { parseDispatchEnvelope } from "../dispatch/input.ts";
+import { dispatchIdempotencyKey, dispatchRepository, isValidDispatchKey } from "../dispatch/plan.ts";
 import { extractRepository } from "../webhooks/extract.ts";
 import { verifyWebhookSignatureWebCrypto } from "../webhooks/verify-webcrypto.ts";
 import type { CloudflareEnv } from "./env.ts";
@@ -56,6 +59,21 @@ async function handleWebhook(request: Request, env: CloudflareEnv): Promise<Resp
 	});
 }
 
+async function handleDispatch(request: Request, env: CloudflareEnv): Promise<Response> {
+	const parsed = parseDispatchEnvelope({
+		value: await request.json(),
+		now: Date.now(),
+	});
+	if (!parsed.ok) return json({ error: parsed.error }, 400);
+	const repo = dispatchRepository(parsed.input.params);
+	if (!repo) return json({ error: "params.repo must be owner/name" }, 400);
+	return stubFor(env, repo).fetch("https://pig-do/dispatch", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(parsed.input),
+	});
+}
+
 async function handleAdmin(request: Request, env: CloudflareEnv, url: URL): Promise<Response> {
 	if (!isAdmin(request, env.PIG_ADMIN_TOKEN)) {
 		return json({ error: "not found" }, env.PIG_ADMIN_TOKEN ? 401 : 404);
@@ -65,6 +83,15 @@ async function handleAdmin(request: Request, env: CloudflareEnv, url: URL): Prom
 		return json({ error: "repo query parameter is required" }, 400);
 	}
 	const stub = stubFor(env, repo);
+	const dispatchKey = url.searchParams.get("dispatchKey");
+	if (url.pathname === "/api/jobs" && dispatchKey !== null) {
+		if (!isValidDispatchKey(dispatchKey)) {
+			return json({ error: "invalid dispatchKey" }, 400);
+		}
+		return stub.fetch(
+			`https://pig-do/job-key?key=${encodeURIComponent(dispatchKey)}`,
+		);
+	}
 	if (url.pathname === "/api/jobs") {
 		const limit = url.searchParams.get("limit") ?? "20";
 		return stub.fetch(
@@ -92,6 +119,24 @@ const worker: ExportedHandler<CloudflareEnv> = {
 					return json({ error: "method not allowed" }, 405);
 				}
 				return await handleWebhook(request, env);
+			}
+			if (request.method === "GET" && url.pathname === "/api/capabilities") {
+				if (!isAdmin(request, env.PIG_ADMIN_TOKEN)) {
+					return json({ error: "not found" }, env.PIG_ADMIN_TOKEN ? 401 : 404);
+				}
+				return json({
+					worker: { name: "PiG", version: "cloudflare" },
+					capabilities: PIG_CAPABILITIES,
+				});
+			}
+			if (url.pathname === "/api/dispatch") {
+				if (request.method !== "POST") {
+					return json({ error: "method not allowed" }, 405);
+				}
+				if (!isAdmin(request, env.PIG_ADMIN_TOKEN)) {
+					return json({ error: "not found" }, env.PIG_ADMIN_TOKEN ? 401 : 404);
+				}
+				return await handleDispatch(request, env);
 			}
 			if (
 				request.method === "GET" &&

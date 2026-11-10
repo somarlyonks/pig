@@ -52,7 +52,7 @@ A console command carries a **dispatch key**, stable across console retries, and
 The reply channel follows the origin, not the job kind:
 
 - Console commands whose artifacts live on GitHub (`work`, `review`, `release`) report progress on GitHub exactly like GitHub-originated commands.
-- Console commands whose entire result is informational (`status`, `help`, `cancel`) are answered in the console. PiG posts no GitHub comment for them.
+- Console commands whose entire result is informational (`status`, `help`, `cancel`) are answered in the console. PiG posts no GitHub comment for them and records the answer on the job record, so the reply survives a console restart.
 
 PiG verifies the claimed actor's repository permission with the GitHub API before running, and applies `.pig.yml` `permissions.allow` on top. The console holds **no GitHub credential**: the console's token authorizes "may submit commands to this PiG", and every GitHub read, write, and permission decision is PiG's own, made with its installation token.
 
@@ -68,7 +68,7 @@ Every `work` and `review` job is anchored to a real GitHub issue or pull request
 - `release` and `control` are repository-scoped and take no anchor.
 - A console command may ask PiG to create the anchor (`anchor: auto`). PiG then creates one issue before preparing the workspace, and the job records the anchor number as a checkpoint before doing any work. This is the only way PiG creates an issue on its own.
 - Anchor creation is idempotent through a hidden marker carrying the job's idempotency key: an attempt, retry, or resumed job reuses an existing anchor instead of opening a second one, and a missing marker search never falls back to creating a duplicate.
-- A PiG-created anchor is a report location, not a command. It names the requesting login and its origin, and it never mentions the app, so its `issues.opened` event plans no command. PiG still records that delivery and ignores it.
+- A PiG-created anchor is a report location, not a command. It names the requesting login and its origin, and PiG adds no command text to it. Opening the issue plans no command, so PiG records that delivery and ignores it.
 - The anchor unifies where a job reports, not what several commands mean. Two commands on one anchor are two jobs with two write targets, in admission order.
 
 ### Admission

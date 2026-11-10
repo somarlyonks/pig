@@ -1,6 +1,9 @@
 import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AppConfig } from "./config.ts";
+import { PIG_CAPABILITIES } from "./dispatch/capabilities.ts";
+import { parseDispatchEnvelope } from "./dispatch/input.ts";
+import { dispatchIdempotencyKey, isValidDispatchKey } from "./dispatch/plan.ts";
 import type { PigApp } from "./durable/runtime-types.ts";
 import type { Logger } from "./logger.ts";
 import { verifyWebhookSignature } from "./webhooks/verify.ts";
@@ -107,6 +110,66 @@ export function startHttpServer(options: HttpServerOptions): Promise<RunningServ
 				version: options.version,
 				description: "Pi-durable In GitHub",
 			});
+			return;
+		}
+
+		if (request.method === "GET" && url.pathname === "/api/capabilities") {
+			if (!isAdmin(request, options.config.adminToken)) {
+				sendJson(response, options.config.adminToken ? 401 : 404, { error: "not found" });
+				return;
+			}
+			sendJson(response, 200, {
+				worker: { name: "PiG", version: options.version },
+				capabilities: PIG_CAPABILITIES,
+			});
+			return;
+		}
+
+		if (request.method === "POST" && url.pathname === "/api/dispatch") {
+			if (!isAdmin(request, options.config.adminToken)) {
+				sendJson(response, options.config.adminToken ? 401 : 404, { error: "not found" });
+				return;
+			}
+			const rawBody = await readRawBody(request, MAX_BODY_BYTES);
+			if (!rawBody) {
+				sendJson(response, 413, { error: "payload too large" });
+				return;
+			}
+			let payload: unknown;
+			try {
+				payload = JSON.parse(rawBody.toString("utf8"));
+			} catch {
+				sendJson(response, 400, { error: "invalid JSON body" });
+				return;
+			}
+			const parsed = parseDispatchEnvelope({ value: payload, now: Date.now() });
+			if (!parsed.ok) {
+				sendJson(response, 400, { error: parsed.error });
+				return;
+			}
+			const result = await options.app.dispatch(parsed.input);
+			sendJson(response, result.status, result.body);
+			return;
+		}
+
+		if (url.pathname === "/api/jobs" && url.searchParams.get("dispatchKey") !== null) {
+			if (!isAdmin(request, options.config.adminToken)) {
+				sendJson(response, options.config.adminToken ? 401 : 404, { error: "not found" });
+				return;
+			}
+			const dispatchKey = url.searchParams.get("dispatchKey");
+			if (!isValidDispatchKey(dispatchKey)) {
+				sendJson(response, 400, { error: "invalid dispatchKey" });
+				return;
+			}
+			const detail = await options.app.getJobByCommandKey(
+				dispatchIdempotencyKey(dispatchKey),
+			);
+			if (!detail) {
+				sendJson(response, 404, { error: "job not found" });
+				return;
+			}
+			sendJson(response, 200, detail);
 			return;
 		}
 

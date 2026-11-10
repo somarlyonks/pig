@@ -126,6 +126,8 @@ function config(workspaceRoot: string): AppConfig {
 function workRequest(): JobRequest {
 	return {
 		kind: "work",
+		origin: "github",
+		target: "new",
 		instructions: "add a new file",
 		actor: "alice",
 		source: { type: "issue", number: 7, title: "An issue" },

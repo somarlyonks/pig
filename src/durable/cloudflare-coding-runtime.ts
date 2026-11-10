@@ -13,9 +13,21 @@ import type { GitHubClients } from "../github/app.ts";
 import { RepoConfigLoader } from "../github/repo-config.ts";
 import type { JobDetail, JobSummary } from "../jobs/context.ts";
 import type { Logger } from "../logger.ts";
-import { admitWebhook, type WebhookInput, type WebhookResult } from "./admission.ts";
+import { dispatchCommand } from "../dispatch/admit.ts";
+import type { DispatchPlanInput } from "../dispatch/plan.ts";
+import {
+	admitWebhook,
+	type WebhookInput,
+	type WebhookResult,
+} from "./admission.ts";
 import { nextAlarmForTasks } from "./alarm.ts";
-import { countActiveJobs, cancelJobsForRepo, getJobDetail, listJobsForRepo } from "./inspect.ts";
+import {
+	countActiveJobs,
+	cancelJobsForRepo,
+	findJobByCommandKey,
+	getJobDetail,
+	listJobsForRepo,
+} from "./inspect.ts";
 import { createJobTask } from "./job-task.ts";
 import type { RemoteRunnerClient } from "./remote-runner.ts";
 import { createRemoteReviewTools, createRemoteWorkTools } from "./remote-tools.ts";
@@ -40,8 +52,10 @@ export interface CloudflareCodingRuntime {
 	config: AppConfig;
 	harness: Harness;
 	admit(input: WebhookInput): Promise<WebhookResult>;
+	dispatch(input: DispatchPlanInput): Promise<WebhookResult>;
 	listJobs(repo: string, limit: number): Promise<JobSummary[]>;
 	getJob(id: string, repo?: string): Promise<JobDetail | null>;
+	getJobByCommandKey(idempotencyKey: string): Promise<JobDetail | null>;
 	activeJobs(): Promise<number>;
 	nextAlarm(now?: number): Promise<number | undefined>;
 	wake(): Wake;
@@ -111,21 +125,20 @@ export async function createCloudflareCodingRuntime(
 	registry.install({ name: "pig.jobs", tasks: [jobTask] });
 	harness.resume();
 
+	const deps = {
+		harness,
+		rootId: root.id,
+		appSlug: config.appSlug,
+		logger,
+		task: jobTask,
+	};
 	return {
 		config,
 		harness,
-		admit: (input) =>
-			admitWebhook(
-				{
-					harness,
-					rootId: root.id,
-					appSlug: config.appSlug,
-					logger,
-					task: jobTask,
-				},
-				input,
-			),
+		admit: (input) => admitWebhook(deps, input),
+		dispatch: (input) => dispatchCommand({ app: options.clients.app, input, deps }),
 		listJobs: (repo, limit) => listJobsForRepo(harness, JOB_TASK_NAME, repo, limit),
+		getJobByCommandKey: (key) => findJobByCommandKey(harness, JOB_TASK_NAME, key),
 		getJob: async (id, repo) => {
 			const detail = await getJobDetail(harness, JOB_TASK_NAME, id);
 			if (!detail) return null;

@@ -10,10 +10,12 @@ import type { AppConfig } from "../config.ts";
 import { createGitHubClients } from "../github/app.ts";
 import { RepoConfigLoader } from "../github/repo-config.ts";
 import type { Logger } from "../logger.ts";
+import { dispatchCommand } from "../dispatch/admit.ts";
 import { admitWebhook } from "./admission.ts";
 import {
 	countActiveJobs,
 	cancelJobsForRepo,
+	findJobByCommandKey,
 	getJobDetail,
 	listJobsForRepo,
 } from "./inspect.ts";
@@ -94,7 +96,20 @@ export async function openPigApp(config: AppConfig, logger: Logger): Promise<Pig
 				},
 				input,
 			),
+		dispatch: (input) =>
+			dispatchCommand({
+				app: clients.app,
+				input,
+				deps: {
+					harness,
+					rootId: root.id as ConversationId,
+					appSlug: config.appSlug,
+					logger,
+					task: jobTask,
+				},
+			}),
 		listJobs: (repo, limit) => listJobsForRepo(harness, JOB_TASK_NAME, repo, limit),
+		getJobByCommandKey: (key) => findJobByCommandKey(harness, JOB_TASK_NAME, key),
 		getJob: async (id, repo) => {
 			const detail = await getJobDetail(harness, JOB_TASK_NAME, id);
 			if (!detail) return null;

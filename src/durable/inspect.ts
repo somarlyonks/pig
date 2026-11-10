@@ -6,7 +6,8 @@ import type {
 	JobSummaryStatus,
 } from "../jobs/context.ts";
 import type { JobKind, JobRequest } from "../jobs/types.ts";
-import { JobDoc } from "./docs.ts";
+import { commandDocKey } from "./admission.ts";
+import { CommandDoc, JobDoc } from "./docs.ts";
 import { readJobDoc } from "./job-docs.ts";
 import type { JobTaskCheckpoint, JobTaskInput } from "./task-types.ts";
 
@@ -89,6 +90,7 @@ function toSummary(
 	return {
 		id: String(record.id),
 		kind: input.request.kind as JobKind,
+		origin: input.request.origin,
 		status,
 		attempts: taskAttempt(record, doc?.attempt),
 		maxAttempts: input.maxAttempts,
@@ -136,7 +138,22 @@ export async function getJobDetail(
 		request: input.request as JobRequest,
 		events: doc?.events ?? [],
 		progressCommentId: doc?.progressCommentId ?? null,
+		reply: doc?.reply ?? null,
 	};
+}
+
+export async function findJobByCommandKey(
+	harness: Harness,
+	taskName: string,
+	idempotencyKey: string,
+): Promise<JobDetail | null> {
+	const command = await harness.snapshot(
+		CommandDoc,
+		commandDocKey(idempotencyKey),
+		BACKGROUND_CONTEXT,
+	);
+	if (!command || command.taskId === 0) return null;
+	return getJobDetail(harness, taskName, String(command.taskId));
 }
 
 export async function cancelJobsForRepo(

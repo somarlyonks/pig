@@ -17,6 +17,7 @@ import type { AppConfig } from "../config.ts";
 import { fetchRepository, splitRepository, type RepositoryInfo } from "../github/repo.ts";
 import type { RepoConfigLoader } from "../github/repo-config.ts";
 import type { GitHubClients } from "../github/app.ts";
+import type { JobRequest } from "../jobs/types.ts";
 import type {
 	AgentSettings,
 	CodingJobContext,
@@ -44,7 +45,6 @@ import type { JobWorkspace, WorkspaceFactory } from "./workspace.ts";
 import {
 	ackText,
 	backoffForAttempt,
-	safeUpdateProgress,
 	shouldAck,
 	shouldReportFailure,
 } from "./failure.ts";
@@ -164,6 +164,16 @@ interface PreparedJob {
 	jobDoc: JobDocValue;
 }
 
+function progressIssueNumber(request: JobRequest, checkpoint: JsonValue | null): number | null {
+	const source = request.source;
+	if (source.type === "issue" || source.type === "pull_request") return source.number;
+	if (source.type === "generated") {
+		const record = checkpoint as { anchorNumber?: unknown } | null;
+		return typeof record?.anchorNumber === "number" ? record.anchorNumber : null;
+	}
+	return null;
+}
+
 function createProgress(
 	deps: JobTaskDeps,
 	task: RunningTask<JobTaskInput, JobTaskCheckpoint, JobTaskResult>,
@@ -175,7 +185,7 @@ function createProgress(
 	return new ProgressComment({
 		octokit: deps.clients.installation(task.input.installationId),
 		repoInfo: { owner, name },
-		issueNumber: task.input.request.source.number,
+		issueNumber: progressIssueNumber(task.input.request, jobDoc.checkpoint),
 		initialId: jobDoc.progressCommentId,
 		logger: deps.logger,
 		onCreated: async (id) => {
@@ -187,6 +197,35 @@ function createProgress(
 			}, context);
 		},
 	});
+}
+
+async function recordReply(
+	deps: JobTaskDeps,
+	task: RunningTask<JobTaskInput, JobTaskCheckpoint, JobTaskResult>,
+	runtime: TaskRuntime<JobTaskInput, JobTaskCheckpoint, JobTaskResult, object>,
+	context: Context,
+	text: string,
+): Promise<void> {
+	await runtime.commit(async (tx) => {
+		const doc = await tx.doc(JobDoc, jobKey(task.id), null);
+		doc.reply = text.slice(0, 20_000);
+		doc.updatedAt = runtime.now();
+		return undefined;
+	}, context);
+}
+
+async function deliverOutcome(
+	deps: JobTaskDeps,
+	task: RunningTask<JobTaskInput, JobTaskCheckpoint, JobTaskResult>,
+	runtime: TaskRuntime<JobTaskInput, JobTaskCheckpoint, JobTaskResult, object>,
+	context: Context,
+	progress: ProgressComment | null,
+	text: string,
+): Promise<void> {
+	const delivered = progress ? await progress.update(text) : false;
+	if (!delivered) {
+		await recordReply(deps, task, runtime, context, text);
+	}
 }
 
 async function prepareJob(
@@ -253,7 +292,10 @@ function buildBaseContext(
 			}, context);
 			base.checkpoint = value;
 		},
-		updateProgress: (text) => progress.update(text),
+		updateProgress: async (text) => {
+			await progress.update(text);
+		},
+		setProgressAnchor: (issueNumber) => progress.setIssueNumber(issueNumber),
 		cancelRepositoryJobs: () => deps.cancelRepoJobs(input.repo, task.id),
 		listJobs: (limit) => deps.listJobs(input.repo, limit),
 		addEvent: async (level, message) => {
@@ -366,12 +408,13 @@ async function handleFailure(
 	if (jobError.retryable && state.attempt < input.maxAttempts) {
 		const nextAttempt = state.attempt + 1;
 		const until = runtime.now() + backoffForAttempt(state.attempt);
-		await safeUpdateProgress(
+		await deliverOutcome(
+			deps,
+			task,
+			runtime,
+			context,
 			progress,
-			input.request,
-			() =>
-				`PiG hit a temporary problem and will retry (attempt ${nextAttempt}/${input.maxAttempts}).`,
-			deps.logger,
+			`PiG hit a temporary problem and will retry (attempt ${nextAttempt}/${input.maxAttempts}).`,
 		);
 		await runtime.commit(async (tx) => {
 			const doc = await tx.doc(JobDoc, jobKey(task.id), null);
@@ -392,12 +435,10 @@ async function handleFailure(
 		return;
 	}
 
-	await safeUpdateProgress(
-		progress,
-		input.request,
-		() => `PiG could not complete this request: ${message}`,
-		deps.logger,
-	);
+	const failureText = `PiG could not complete this request: ${message}`;
+	if (shouldReportFailure(input.request)) {
+		await deliverOutcome(deps, task, runtime, context, progress, failureText);
+	}
 	await runtime.commit(async (tx) => {
 		const doc = await tx.doc(JobDoc, jobKey(task.id), null);
 		doc.status = "failed";
@@ -486,7 +527,7 @@ async function runPhase(
 			return;
 		}
 		if (outcome.comment !== null) {
-			await progress.update(outcome.comment);
+			await deliverOutcome(deps, task, runtime, context, progress, outcome.comment);
 		}
 		const result: JobTaskResult = {
 			summary: outcome.summary,

@@ -16,6 +16,7 @@ export function emptyJobDoc(): JobDocValue {
 		attempt: 1,
 		summary: null,
 		error: null,
+		reply: null,
 		events: [],
 		updatedAt: 0,
 	};

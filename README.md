@@ -285,10 +285,35 @@ PiG has one durable model, supplied by `pi-durable`:
 
 - `GET /healthz` — liveness, uptime, and active job count.
 - `GET /api/jobs?repo=owner/name&limit=20` — requires `Authorization: Bearer $PIG_ADMIN_TOKEN`.
-- `GET /api/jobs/:id` — job summary, request, events, and progress comment id; same auth.
+- `GET /api/jobs/:id` — job summary, request, events, progress comment id, and the console reply, if any; same auth.
+- `GET /api/jobs?dispatchKey=<key>` — the job a console dispatch key created, for resolving an unknown outcome.
+- `GET /api/capabilities` — the commands PiG accepts from an operator console.
+- `POST /api/dispatch` — submit a console command. Requires the admin token.
 - Logs go to stdout/stderr. `pi-durable` reports are logged with their task kind and error.
 - Back up `PIG_DATABASE_PATH` (and its WAL) under `/data`. `PIG_TABLE_PREFIX` must stay unchanged.
 - To rotate the App key or webhook secret: update the environment, restart, and update GitHub App settings.
+
+## Console dispatch
+
+PiG can also accept commands from an operator console. This is additive: GitHub comments keep working the same way, and nothing depends on a console existing. Every dispatch is an authenticated `POST /api/dispatch` with a stable key:
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8080/api/dispatch" \
+  -H "authorization: Bearer $PIG_ADMIN_TOKEN" \
+  -H "content-type: application/json" \
+  -d '{
+    "capability": "pig.work",
+    "dispatchKey": "console-2026-03-22-1",
+    "actor": "your-github-login",
+    "params": { "repo": "owner/name", "instructions": "Add a regression test for the parser" }
+  }'
+```
+
+- `actor` is a claim. PiG verifies that login's repository permission with its own installation token, so the console never needs a GitHub credential.
+- Repeat the same `dispatchKey` to retry safely: it resolves to the same job. Use `GET /api/jobs?dispatchKey=<key>` when you never saw the response.
+- `pig.work` without an `anchor` makes PiG create an issue first, then a branch and pull request for it.
+- With an `anchor` and `anchorType`, `target` selects where the change lands: `new` (branch from the default branch), `head` (the pull request's own branch), or `patch` (a PiG-owned branch above the pull request head, opened as a draft pull request; the only target that works for a fork).
+- `pig.status` and `pig.cancel` are answered on the job record instead of GitHub. Read the answer from `GET /api/jobs/:id` in the `reply` field.
 
 ## Security
 

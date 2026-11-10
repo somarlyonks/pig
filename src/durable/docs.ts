@@ -13,6 +13,7 @@ export interface JobDocValue {
 	attempt: number;
 	summary: string | null;
 	error: string | null;
+	reply: string | null;
 	events: string[];
 	updatedAt: number;
 }
@@ -51,6 +52,7 @@ export const JobDoc = defineDocFamily<JobDocValue, null>({
 		attempt: 1,
 		summary: null,
 		error: null,
+		reply: null,
 		events: [],
 		updatedAt: 0,
 	}),

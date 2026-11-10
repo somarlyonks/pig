@@ -15,14 +15,14 @@ export class ProgressComment {
 	private id: number | null;
 	private readonly octokit: Octokit;
 	private readonly repoInfo: ProgressRepo;
-	private readonly issueNumber: number;
+	private issueNumber: number | null;
 	private readonly onCreated: (id: number) => Promise<void>;
 	private readonly logger: Logger;
 
 	constructor(options: {
 		octokit: Octokit;
 		repoInfo: ProgressRepo;
-		issueNumber: number;
+		issueNumber: number | null;
 		initialId: number | null;
 		onCreated: (id: number) => Promise<void>;
 		logger: Logger;
@@ -35,11 +35,20 @@ export class ProgressComment {
 		this.id = options.initialId;
 	}
 
-	async update(body: string): Promise<void> {
+	/**
+	 * A job may learn its anchor after it starts: a console command can ask PiG
+	 * to create one, and repository-scoped commands never have one.
+	 */
+	setIssueNumber(issueNumber: number): void {
+		this.issueNumber = issueNumber;
+	}
+
+	async update(body: string): Promise<boolean> {
+		if (this.issueNumber === null) return false;
 		const text = truncateComment(body);
 		if (this.id === null) {
 			await this.create(text);
-			return;
+			return true;
 		}
 		try {
 			await this.octokit.issues.updateComment({
@@ -52,18 +61,21 @@ export class ProgressComment {
 			if ((error as { status?: number }).status === 404) {
 				this.id = null;
 				await this.create(text);
-				return;
+				return true;
 			}
 			this.logger.warn("Could not update progress comment", { error });
 		}
+		return true;
 	}
 
 	private async create(text: string): Promise<void> {
+		const issueNumber = this.issueNumber;
+		if (issueNumber === null) return;
 		try {
 			const { data } = await this.octokit.issues.createComment({
 				owner: this.repoInfo.owner,
 				repo: this.repoInfo.name,
-				issue_number: this.issueNumber,
+				issue_number: issueNumber,
 				body: text,
 			});
 			this.id = data.id;
